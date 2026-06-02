@@ -18,7 +18,7 @@ fn main() {
     
     let mut network = NeuralNetwork::new();
 
-    // network.insert("the quick brown fox jumps over the lazy dog", "en");
+    // network.insert("the quick brown fox jumps over the lazy dog", "en");    
     // network.insert("the sun rises over the horizon above the ocean", "en");
     // network.insert("the moon shines brightly in the night sky", "en");
     // network.insert("the stars twinkle in the vast expanse of space", "en");
@@ -41,6 +41,7 @@ fn main() {
     // network.insert("the ocean's vastness holds countless mysteries", "en");
     // network.insert("the city buzzes with energy and excitement", "en");
     // network.insert("the flowers' vibrant colors brighten the day", "en");
+    // network.insert("the quick brown goat jumps over the lazy cat", "en");
 
     // network.save("testing.bin");
     network.load("testing.bin");

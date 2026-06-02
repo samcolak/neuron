@@ -1,9 +1,32 @@
 
 use crate::helpers::axon::Axon;
 
+use uuid::Uuid;
+
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
 
+
+fn normalize_data_key(input: &str) -> String {
+
+    let lowered = input.to_lowercase();
+    let normalized: String = lowered
+        .chars()
+        .map(|ch| {
+            if ch.is_alphanumeric() || ch.is_whitespace() {
+                ch
+            } else {
+                ' '
+            }
+        })
+        .collect();
+
+    normalized
+        .split_whitespace()
+        .collect::<Vec<&str>>()
+        .join(" ")
+
+}
 
 // Dendrite represents the receiving end of a connection in a neural network. It can have multiple connections (Axons) coming into it, and it holds some data.
 
@@ -13,19 +36,31 @@ pub struct Dendrite {
     pub connections: Vec<Axon>,
     pub data: String,
     #[serde(skip, default)]
+    pub normalized_key: String,
+    #[serde(skip, default)]
     pub connection_index: HashMap<String, usize>,
 }
 
 
 impl Dendrite {
 
-    pub fn new(uid: String, data: String) -> Self {
+    pub fn unique_id() -> String {    
+        Uuid::now_v7().to_string().replace("-", "")    
+    }
+
+    pub fn new(data: String) -> Self {
+        
+        let uid = Self::unique_id();
+        let normalized_key = normalize_data_key(&data);
+        
         Self {
             uid,
             connections: Vec::new(),
             data,
+            normalized_key,
             connection_index: HashMap::new(),
         }
+        
     }
 
     pub fn connect(&mut self, other: String, weight: i64) {

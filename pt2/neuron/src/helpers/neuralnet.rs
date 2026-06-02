@@ -8,57 +8,68 @@ use serde::{Deserialize, Serialize};
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::sync::Mutex;
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 const NEURON_BIN_MAGIC: [u8; 4] = *b"NRN1";
 
 
 lazy_static! {
-    static ref NEURALNET: Mutex<NeuralNetwork> = Mutex::new(NeuralNetwork::new());
+    static ref NEURALNET: RwLock<NeuralNetwork> = RwLock::new(NeuralNetwork::new());
 }
 
 
 // singleton accessors and mutators for the neural network instance
 
-pub fn get_neural_network() -> std::sync::MutexGuard<'static, NeuralNetwork> {
-    NEURALNET.lock().unwrap()
+pub fn get_neural_network_read() -> RwLockReadGuard<'static, NeuralNetwork> {
+    NEURALNET.read().unwrap()
 }
 
 
-pub fn neuralnet_add_dendrite(uid: String, data: String) {
-    let mut neural_net = get_neural_network();
-    let dendrite = Dendrite::new(uid.clone(), data);
+pub fn get_neural_network_write() -> RwLockWriteGuard<'static, NeuralNetwork> {
+    NEURALNET.write().unwrap()
+}
+
+
+pub fn get_neural_network() -> RwLockWriteGuard<'static, NeuralNetwork> {
+    get_neural_network_write()
+}
+
+
+pub fn neuralnet_add_dendrite(data: String) {
+    let mut neural_net = get_neural_network_write();
+    let dendrite = Dendrite::new(data);
+    let uid = dendrite.uid.clone();
     neural_net.dendrites.insert(uid.clone(), dendrite);
     neural_net.index_dendrite_token(&uid);
 }
 
 
 pub fn neuralnet_enumerate_dendrites() -> Vec<Dendrite> {
-    let neural_net = get_neural_network();
+    let neural_net = get_neural_network_read();
     neural_net.all_dendrites_sorted()
 }
 
 
 pub fn neuralnet_enumerate(data: &str) -> Vec<Dendrite> {
-    let neural_net = get_neural_network();
+    let neural_net = get_neural_network_read();
     collect_children_from_network(&neural_net.dendrites, data)
 }
 
 
 pub fn neuralnet_insert(content: &str, language: &str) {
-    let mut neural_net = get_neural_network();
+    let mut neural_net = get_neural_network_write();
     neural_net.insert(content, language);
 }
 
 
 pub fn neuralnet_save(filename: &str) {
-    let neural_net = get_neural_network();
+    let neural_net = get_neural_network_read();
     neural_net.save(filename);
 }
 
 
 pub fn neuralnet_load(filename: &str) {
-    let mut neural_net = get_neural_network();
+    let mut neural_net = get_neural_network_write();
     let _ = neural_net.load(filename);
 }
 
@@ -72,6 +83,30 @@ pub struct NeuralNetwork {
     dendrites: HashMap<String, Dendrite>,
     #[serde(skip, default)]
     token_index: HashMap<String, Vec<String>>,
+    #[serde(skip, default)]
+    token_cluster_index: HashMap<String, Vec<String>>,
+}
+
+
+enum CandidateUidSet<'a> {
+    Borrowed(&'a [String]),
+    Owned(Vec<String>),
+}
+
+
+impl<'a> CandidateUidSet<'a> {
+
+    fn is_empty(&self) -> bool {
+        self.as_slice().is_empty()
+    }
+
+    fn as_slice(&self) -> &[String] {
+        match self {
+            CandidateUidSet::Borrowed(items) => items,
+            CandidateUidSet::Owned(items) => items.as_slice(),
+        }
+    }
+
 }
 
 
@@ -340,6 +375,64 @@ fn stop_words_for_language(language: &str) -> Vec<&'static str> {
 
 impl NeuralNetwork {
 
+    fn token_key_for_index(data: &str) -> String {
+        normalize_for_fuzzy_comparison(data)
+    }
+
+    fn cluster_key_for_token(token_key: &str) -> Option<String> {
+
+        let chars: Vec<char> = token_key.chars().filter(|ch| !ch.is_whitespace()).collect();
+
+        if chars.is_empty() {
+            return None;
+        }
+
+        let first = chars[0];
+        let last = chars[chars.len() - 1];
+        let len_bucket = chars.len().min(32);
+
+        Some(format!("{}:{}:{}", first, last, len_bucket))
+
+    }
+
+    fn candidate_uids_for_token<'a>(&'a self, token_key: &str) -> CandidateUidSet<'a> {
+
+        if let Some(exact_matches) = self.token_index.get(token_key) {
+            return CandidateUidSet::Borrowed(exact_matches.as_slice());
+        }
+
+        let Some(cluster_key) = Self::cluster_key_for_token(token_key) else {
+            return CandidateUidSet::Owned(Vec::new());
+        };
+
+        let Some(cluster_matches) = self.token_cluster_index.get(&cluster_key) else {
+            return CandidateUidSet::Owned(Vec::new());
+        };
+
+        CandidateUidSet::Owned(cluster_matches
+            .iter()
+            .filter_map(|uid| {
+                let candidate = self.dendrites.get(uid)?;
+                let candidate_key_owned;
+                let candidate_key = if candidate.normalized_key.is_empty() {
+                    candidate_key_owned = Self::token_key_for_index(&candidate.data);
+                    candidate_key_owned.as_str()
+                } else {
+                    candidate.normalized_key.as_str()
+                };
+
+                let (score, _) = evaluate_fuzziness(token_key, candidate_key);
+
+                if score >= 0.60 {
+                    Some(uid.clone())
+                } else {
+                    None
+                }
+            })
+            .collect())
+
+    }
+
     pub fn load(&mut self, filename: &str) -> bool {
 
         if let Ok(bytes) = fs::read(filename) {
@@ -384,26 +477,28 @@ impl NeuralNetwork {
             .split_whitespace()
             .map(str::trim)
             .filter(|token| !token.is_empty())
-            .map(|token| token.to_lowercase())
+            .map(Self::token_key_for_index)
+            .filter(|token| !token.is_empty())
             .collect();
 
         if path_tokens.is_empty() {
             return (None, Vec::new());
         }
 
-        let mut current_uids = self
-            .token_index
-            .get(&path_tokens[0])
-            .cloned()
-            .unwrap_or_default();
+        let mut current_uids = self.candidate_uids_for_token(&path_tokens[0]).as_slice().to_vec();
 
         for segment_key in &path_tokens[1..] {
 
-            let Some(target_uids) = self.token_index.get(segment_key) else {
+            let target_uids = self.candidate_uids_for_token(segment_key);
+            if target_uids.is_empty() {
                 return (None, Vec::new());
-            };
+            }
 
-            let target_uid_set: HashSet<&str> = target_uids.iter().map(String::as_str).collect();
+            let target_uid_set: HashSet<&str> = target_uids
+                .as_slice()
+                .iter()
+                .map(String::as_str)
+                .collect();
             let mut next_uids = Vec::new();
 
             for uid in &current_uids {
@@ -458,20 +553,6 @@ impl NeuralNetwork {
             self.rebuild_token_index();
         }
 
-        fn allocate_uid(neural_net: &NeuralNetwork, next_uid_index: &mut usize) -> String {
-            
-            let mut candidate = format!("dendrite_{}", *next_uid_index);
-            
-            while neural_net.dendrites.contains_key(&candidate) {
-                *next_uid_index += 1;
-                candidate = format!("dendrite_{}", *next_uid_index);
-            }
-            
-            *next_uid_index += 1;
-            candidate
-
-        }
-
         fn has_direct_connection(neural_net: &NeuralNetwork, from_uid: &str, to_uid: &str) -> bool {
 
             neural_net
@@ -482,15 +563,6 @@ impl NeuralNetwork {
                 
         }
 
-        fn candidate_uids_for_token<'a>(
-            neural_net: &'a NeuralNetwork,
-            token_key: &str,
-        ) -> Option<&'a Vec<String>> {
-
-            neural_net.token_index.get(token_key)
-
-        }
-
         fn pick_best_uid(
             neural_net: &NeuralNetwork,
             token_key: &str,
@@ -498,10 +570,17 @@ impl NeuralNetwork {
             next_token_key: Option<&str>,
         ) -> Option<String> {
 
-            let candidates = candidate_uids_for_token(neural_net, token_key)?;
-            let next_candidates = next_token_key.and_then(|t| candidate_uids_for_token(neural_net, t));
+            let candidates = neural_net.candidate_uids_for_token(token_key);
+            if candidates.is_empty() {
+                return None;
+            }
+
+            let next_candidates = next_token_key
+                .map(|t| neural_net.candidate_uids_for_token(t))
+                .filter(|c| !c.is_empty());
 
             candidates
+                .as_slice()
                 .iter()
                 .max_by_key(|candidate_uid| {
                     let mut score = 0;
@@ -510,8 +589,9 @@ impl NeuralNetwork {
                     {
                         score += 2;
                     }
-                    if let Some(next) = next_candidates
+                    if let Some(next) = next_candidates.as_ref()
                         && next
+                            .as_slice()
                             .iter()
                             .any(|next_uid| has_direct_connection(neural_net, candidate_uid, next_uid))
                     {
@@ -530,10 +610,14 @@ impl NeuralNetwork {
         ) -> Option<String> {
 
             let from_node = neural_net.dendrites.get(from_uid)?;
-            let target_uids = neural_net.token_index.get(target_key)?;
+            let target_uids = neural_net.candidate_uids_for_token(target_key);
+
+            if target_uids.is_empty() {
+                return None;
+            }
 
             from_node.connections.iter().find_map(|conn| {
-                if target_uids.iter().any(|uid| uid == &conn.to) {
+                if target_uids.as_slice().iter().any(|uid| uid == &conn.to) {
                     Some(conn.to.clone())
                 } else {
                     None
@@ -554,7 +638,11 @@ impl NeuralNetwork {
         }
 
         let neural_net = self;
-        let token_keys: Vec<String> = tokens.iter().map(|token| token.to_lowercase()).collect();
+        let token_keys: Vec<String> = tokens
+            .iter()
+            .map(|token| Self::token_key_for_index(token))
+            .collect();
+        
         let stop_word_set: HashSet<&'static str> = stop_words_for_language(language).into_iter().collect();
         let is_stop_word = |token_key: &str| stop_word_set.contains(token_key);
 
@@ -594,7 +682,6 @@ impl NeuralNetwork {
                 .windows(2)
                 .all(|pair| has_direct_connection(neural_net, &pair[0], &pair[1]));
 
-        let mut next_uid_index = neural_net.dendrites.len() + 1;
         let mut chosen_path: Vec<String> = if has_complete_existing_path {
             selected_existing_path
         } else {
@@ -616,9 +703,9 @@ impl NeuralNetwork {
                     continue;
                 }
 
-                let new_uid = allocate_uid(neural_net, &mut next_uid_index);
-                let new_dendrite = Dendrite::new(new_uid.clone(), tokens[index].clone());
-                
+                let new_dendrite = Dendrite::new(tokens[index].clone());
+                let new_uid = new_dendrite.uid.clone();
+
                 neural_net.dendrites.insert(new_uid.clone(), new_dendrite);
                 neural_net.index_dendrite_token(&new_uid);
                 chosen_path.push(new_uid);
@@ -639,8 +726,9 @@ impl NeuralNetwork {
                 Some(existing_uid) => existing_uid,
 
                 None => {
-                    let new_uid = allocate_uid(neural_net, &mut next_uid_index);
-                    let new_dendrite = Dendrite::new(new_uid.clone(), tokens[index].clone());
+                    let new_dendrite = Dendrite::new(tokens[index].clone());
+                    let new_uid = new_dendrite.uid.clone();
+                    
                     neural_net.dendrites.insert(new_uid.clone(), new_dendrite);
                     neural_net.index_dendrite_token(&new_uid);
                     new_uid
@@ -664,14 +752,34 @@ impl NeuralNetwork {
         Self {
             dendrites: HashMap::new(),
             token_index: HashMap::new(),
+            token_cluster_index: HashMap::new(),
         }
     }
 
     fn index_dendrite_token(&mut self, uid: &str) {
 
-        if let Some(dendrite) = self.dendrites.get(uid) {
-            let key = dendrite.data.to_lowercase();
-            self.token_index.entry(key).or_default().push(uid.to_string());
+        if let Some(dendrite) = self.dendrites.get_mut(uid) {
+            if dendrite.normalized_key.is_empty() {
+                dendrite.normalized_key = Self::token_key_for_index(&dendrite.data);
+            }
+
+            let key = dendrite.normalized_key.clone();
+
+            if key.is_empty() {
+                return;
+            }
+
+            self.token_index
+                .entry(key.clone())
+                .or_default()
+                .push(uid.to_string());
+
+            if let Some(cluster_key) = Self::cluster_key_for_token(&key) {
+                self.token_cluster_index
+                    .entry(cluster_key)
+                    .or_default()
+                    .push(uid.to_string());
+            }
         }
 
     }
@@ -679,12 +787,28 @@ impl NeuralNetwork {
     fn rebuild_token_index(&mut self) {
 
         self.token_index.clear();
+        self.token_cluster_index.clear();
         
-        for (uid, dendrite) in &self.dendrites {
-            self.token_index
-                .entry(dendrite.data.to_lowercase())
-                .or_default()
-                .push(uid.clone());
+        for (uid, dendrite) in &mut self.dendrites {
+
+            if dendrite.normalized_key.is_empty() {
+                dendrite.normalized_key = Self::token_key_for_index(&dendrite.data);
+            }
+
+            let key = dendrite.normalized_key.clone();
+
+            if key.is_empty() {
+                continue;
+            }
+
+            self.token_index.entry(key.clone()).or_default().push(uid.clone());
+
+            if let Some(cluster_key) = Self::cluster_key_for_token(&key) {
+                self.token_cluster_index
+                    .entry(cluster_key)
+                    .or_default()
+                    .push(uid.clone());
+            }
         }
 
     }
@@ -716,9 +840,9 @@ mod tests {
     fn seeded_network(entries: &[(&str, &str)]) -> NeuralNetwork {
         let mut network = NeuralNetwork::new();
         for (uid, data) in entries {
-            network
-                .dendrites
-                .insert((*uid).to_string(), Dendrite::new((*uid).to_string(), (*data).to_string()));
+            let mut dendrite = Dendrite::new((*data).to_string());
+            dendrite.uid = (*uid).to_string();
+            network.dendrites.insert((*uid).to_string(), dendrite);
         }
         network
     }
@@ -756,6 +880,30 @@ mod tests {
         let (score, details) = evaluate_fuzziness("Hello,   world!", "hello world");
         assert_eq!(score, 1.0);
         assert!(details.is_empty());
+    }
+
+    #[test]
+    fn enumerate_path_can_use_clustered_token_fallback() {
+        let mut network = NeuralNetwork::new();
+        network.insert("hello world", "en");
+
+        let (node, optional_path) = network.enumerate_path("hello wurld");
+
+        assert!(node.is_some());
+        let node = node.expect("expected clustered fallback match");
+        assert_eq!(node.data, "world");
+        assert!(optional_path.is_empty());
+    }
+
+    #[test]
+    fn insert_keeps_map_key_and_dendrite_uid_in_sync() {
+        let mut network = NeuralNetwork::new();
+        network.insert("alpha beta gamma", "en");
+
+        assert!(network
+            .dendrites
+            .iter()
+            .all(|(uid, dendrite)| uid == &dendrite.uid));
     }
 
     #[test]
