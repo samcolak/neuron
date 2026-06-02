@@ -4,9 +4,12 @@ A set of examples to demonstrate the creation and population of neural networks 
 
 Written by Samuel Colak
 
-Distributed under GPL3 License
-
 
 ## Overview
 
 Neural Networks are not that complicated...
+
+
+## Distribution
+
+The is distributed under the GPL3 license
