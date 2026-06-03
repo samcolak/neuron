@@ -1,15 +1,58 @@
-
 use crate::helpers::controllers::textnode_controller::TextNodeController;
 use crate::helpers::neuralnet::NeuralNetwork;
-use crate::helpers::textdendrite::TextDendrite;
+use crate::helpers::text_dendrite::TextDendrite;
+
+use serde::{de::DeserializeOwned, Serialize};
 
 use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 type TextNeuralNetwork = NeuralNetwork<TextNodeController, TextDendrite>;
+
+const NEURON_BIN_MAGIC: [u8; 4] = *b"NRN4";
+
+fn load_network_from_file<C, N>(network: &mut NeuralNetwork<C, N>, filename: &str) -> bool
+where
+    C: crate::helpers::nodenet::NodeNetworkController,
+    N: crate::helpers::nodenet::NetworkNode + Clone + Serialize + DeserializeOwned,
+{
+    if let Ok(bytes) = fs::read(filename) {
+        if bytes.len() >= 4 && bytes[0..4] == NEURON_BIN_MAGIC
+            && let Ok(loaded) = bincode::deserialize::<NeuralNetwork<C, N>>(&bytes[4..])
+        {
+            *network = loaded;
+            network.rebuild_connection_indexes();
+            network.rebuild_token_index();
+            return true;
+        }
+
+        if let Ok(loaded) = serde_json::from_slice::<NeuralNetwork<C, N>>(&bytes) {
+            *network = loaded;
+            network.rebuild_connection_indexes();
+            network.rebuild_token_index();
+            return true;
+        }
+    }
+
+    false
+}
+
+fn save_network_to_file<C, N>(network: &NeuralNetwork<C, N>, filename: &str)
+where
+    C: crate::helpers::nodenet::NodeNetworkController,
+    N: crate::helpers::nodenet::NetworkNode + Clone + Serialize + DeserializeOwned,
+{
+    if let Ok(encoded) = bincode::serialize(network) {
+        let mut bytes = Vec::with_capacity(NEURON_BIN_MAGIC.len() + encoded.len());
+        bytes.extend_from_slice(&NEURON_BIN_MAGIC);
+        bytes.extend_from_slice(&encoded);
+        let _ = fs::write(filename, bytes);
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TextNetworkStoreMetrics {
@@ -28,9 +71,8 @@ pub struct TextNetworkStoreMetrics {
 }
 
 pub trait TextNetworkStore: Send + Sync {
-
     fn load_into(&self, network: &mut TextNeuralNetwork) -> bool;
-    
+
     fn persist(&self, network: &TextNeuralNetwork);
 
     fn persist_force(&self, network: &TextNeuralNetwork) {
@@ -40,7 +82,6 @@ pub trait TextNetworkStore: Send + Sync {
     fn metrics(&self) -> TextNetworkStoreMetrics {
         TextNetworkStoreMetrics::default()
     }
-
 }
 
 pub struct FileTextNetworkStore {
@@ -56,7 +97,6 @@ pub struct FileTextNetworkStore {
 }
 
 impl FileTextNetworkStore {
-
     pub fn from_filename(filename: String) -> Self {
         Self {
             filename,
@@ -71,20 +111,14 @@ impl FileTextNetworkStore {
         }
     }
 
-    pub fn from_env() -> Self {
-        Self::from_filename(
-            env::var("NEURON_STORE_FILE").unwrap_or_else(|_| "./neuron_store.nrn".to_string()),
-        )
-    }
-
     fn persist_internal(&self, network: &TextNeuralNetwork, forced: bool) {
         self.persist_requests.fetch_add(1, Ordering::Relaxed);
 
         let start = Instant::now();
-        network.save(&self.filename);
+        save_network_to_file(network, &self.filename);
         let latency_micros = start.elapsed().as_micros() as u64;
 
-        let bytes = std::fs::metadata(&self.filename)
+        let bytes = fs::metadata(&self.filename)
             .map(|metadata| metadata.len())
             .unwrap_or(0);
 
@@ -98,14 +132,12 @@ impl FileTextNetworkStore {
             self.forced_flush_writes.fetch_add(1, Ordering::Relaxed);
         }
     }
-
 }
 
 impl TextNetworkStore for FileTextNetworkStore {
-
     fn load_into(&self, network: &mut TextNeuralNetwork) -> bool {
         self.load_attempts.fetch_add(1, Ordering::Relaxed);
-        let loaded = network.load(&self.filename);
+        let loaded = load_network_from_file(network, &self.filename);
         if loaded {
             self.load_successes.fetch_add(1, Ordering::Relaxed);
         }
@@ -136,7 +168,6 @@ impl TextNetworkStore for FileTextNetworkStore {
             pending_writes: 0,
         }
     }
-
 }
 
 pub struct BufferedFileTextNetworkStore {
@@ -149,7 +180,6 @@ pub struct BufferedFileTextNetworkStore {
 }
 
 impl BufferedFileTextNetworkStore {
-
     pub fn from_filename(filename: String) -> Self {
         let flush_every = env::var("NEURON_STORE_FLUSH_EVERY")
             .ok()
@@ -173,23 +203,15 @@ impl BufferedFileTextNetworkStore {
         }
     }
 
-    pub fn from_env() -> Self {
-        Self::from_filename(
-            env::var("NEURON_STORE_FILE").unwrap_or_else(|_| "./neuron_store.nrn".to_string()),
-        )
-    }
-
     fn mark_flush_complete(&self) {
         self.pending_writes.store(0, Ordering::Relaxed);
         if let Ok(mut last) = self.last_flush.lock() {
             *last = Instant::now();
         }
     }
-
 }
 
 impl TextNetworkStore for BufferedFileTextNetworkStore {
-
     fn load_into(&self, network: &mut TextNeuralNetwork) -> bool {
         self.inner.load_into(network)
     }
@@ -234,11 +256,6 @@ impl TextNetworkStore for BufferedFileTextNetworkStore {
             pending_writes: self.pending_writes.load(Ordering::Relaxed),
         }
     }
-
-}
-
-pub fn build_text_network_store_from_env() -> Box<dyn TextNetworkStore> {
-    build_text_network_store_for_network("default")
 }
 
 fn sanitize_network_id(network_id: &str) -> String {
@@ -255,7 +272,6 @@ fn sanitize_network_id(network_id: &str) -> String {
 }
 
 fn store_filename_for_network(network_id: &str) -> String {
-
     let base = env::var("NEURON_STORE_FILE").unwrap_or_else(|_| "./neuron_store.nrn".to_string());
 
     if network_id == "default" {
@@ -284,11 +300,9 @@ fn store_filename_for_network(network_id: &str) -> String {
     let mut path = parent;
     path.push(format!("{}_{}.{}", stem, sanitized_id, extension));
     path.to_string_lossy().to_string()
-
 }
 
 pub fn build_text_network_store_for_network(network_id: &str) -> Box<dyn TextNetworkStore> {
-
     let filename = store_filename_for_network(network_id);
 
     match env::var("NEURON_STORE_MODE")
@@ -300,5 +314,4 @@ pub fn build_text_network_store_for_network(network_id: &str) -> Box<dyn TextNet
         "buffered" => Box::new(BufferedFileTextNetworkStore::from_filename(filename)),
         _ => Box::new(FileTextNetworkStore::from_filename(filename)),
     }
-
 }

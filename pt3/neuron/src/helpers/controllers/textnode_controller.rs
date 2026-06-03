@@ -1,4 +1,4 @@
-use crate::helpers::textdendrite::DendriteType;
+use crate::helpers::text_dendrite::DendriteType;
 use crate::helpers::neuralnet::NeuralNetwork;
 use crate::helpers::nodenet::{NetworkNode, NodeNetwork, NodeNetworkController, TokenClusterKeyStrategy};
 
@@ -541,8 +541,7 @@ where
 mod tests {
 
     use super::*;
-    use crate::helpers::textdendrite::TextDendrite;
-    use std::path::PathBuf;
+    use crate::helpers::text_dendrite::TextDendrite;
 
     type TextTestNetwork = NeuralNetwork<TextNodeController, TextDendrite>;
 
@@ -774,43 +773,6 @@ mod tests {
         let children = network.enumerate_children("mountain");
         assert_eq!(children.len(), 1);
         assert_eq!(children[0].data, "stands");
-    }
-
-    #[test]
-    fn save_and_load_round_trip_binary() {
-        let mut network = TextTestNetwork::new();
-        network.insert("alpha beta", "en", DendriteType::Statement);
-
-        let mut path: PathBuf = std::env::temp_dir();
-        path.push("neuron_round_trip_test.nrn");
-        let filename = path.to_string_lossy().to_string();
-
-        network.save(&filename);
-        let mut loaded = TextTestNetwork::new();
-        loaded.load(&filename);
-
-        assert_eq!(loaded.all_dendrites_sorted().len(), network.all_dendrites_sorted().len());
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn load_legacy_json_is_still_supported() {
-        let mut network = TextTestNetwork::new();
-        network.insert("legacy format", "en", DendriteType::Statement);
-
-        let mut path: PathBuf = std::env::temp_dir();
-        path.push("neuron_legacy_round_trip_test.json");
-        let filename = path.to_string_lossy().to_string();
-
-        let json = serde_json::to_vec(&network).expect("expected to serialize json");
-        std::fs::write(&filename, json).expect("expected to write legacy json");
-
-        let mut loaded = TextTestNetwork::new();
-        assert!(loaded.load(&filename));
-        assert_eq!(loaded.all_dendrites_sorted().len(), network.all_dendrites_sorted().len());
-
-        let _ = std::fs::remove_file(path);
     }
 
 }

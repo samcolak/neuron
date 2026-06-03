@@ -1,17 +1,16 @@
-
 use crate::helpers::controllers::textnode_controller::{
     get_first_hit_metrics,
     FirstHitMetrics,
     TextNodeController,
 };
 
-use crate::helpers::network_store::{
+use crate::helpers::text_network_store::{
     build_text_network_store_for_network,
     TextNetworkStore,
     TextNetworkStoreMetrics,
 };
 
-use crate::helpers::textdendrite::{DendriteType, TextDendrite};
+use crate::helpers::text_dendrite::{DendriteType, TextDendrite};
 use crate::helpers::neuralnet::NeuralNetwork;
 use crate::helpers::nodenet::NodeNetwork;
 
@@ -19,7 +18,7 @@ use lazy_static::lazy_static;
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::RwLock;
 
 pub type TextNeuralNetwork = NeuralNetwork<TextNodeController, TextDendrite>;
 
@@ -85,20 +84,6 @@ lazy_static! {
     };
 }
 
-// singleton accessors and mutators for the neural network instance
-
-pub fn get_neural_network_read() -> RwLockReadGuard<'static, TextNeuralNetwork> {
-    DEFAULT_NETWORK.network.read().unwrap()
-}
-
-pub fn get_neural_network_write() -> RwLockWriteGuard<'static, TextNeuralNetwork> {
-    DEFAULT_NETWORK.network.write().unwrap()
-}
-
-pub fn get_neural_network() -> RwLockWriteGuard<'static, TextNeuralNetwork> {
-    get_neural_network_write()
-}
-
 pub fn neuralnet_add_dendrite(data: &str, language: &str, dendrite_type: DendriteType) {
     neuralnet_add_dendrite_for(DEFAULT_NETWORK_ID, data, language, dendrite_type);
 }
@@ -155,16 +140,6 @@ pub fn neuralnet_insert_for(
     managed.store.persist(&snapshot);
 }
 
-pub fn neuralnet_save(filename: &str) {
-    neuralnet_save_for(DEFAULT_NETWORK_ID, filename);
-}
-
-pub fn neuralnet_save_for(network_id: &str, filename: &str) {
-    let managed = get_or_create_network(network_id);
-    let neural_net = managed.network.read().unwrap();
-    neural_net.save(filename);
-}
-
 pub fn neuralnet_flush() {
     neuralnet_flush_for(DEFAULT_NETWORK_ID);
 }
@@ -218,7 +193,6 @@ pub fn neuralnet_loaded_network_ids() -> Vec<String> {
 }
 
 pub fn neuralnet_evict_network(network_id: &str) -> bool {
-    
     let resolved_id = resolve_network_id(network_id);
 
     if resolved_id == DEFAULT_NETWORK_ID {
@@ -240,24 +214,7 @@ pub fn neuralnet_evict_network(network_id: &str) -> bool {
     true
 }
 
-pub fn neuralnet_load(filename: &str) {
-    neuralnet_load_for(DEFAULT_NETWORK_ID, filename);
-}
-
-pub fn neuralnet_load_for(network_id: &str, filename: &str) {
-    
-    let managed = get_or_create_network(network_id);
-    let mut neural_net = managed.network.write().unwrap();
-    if neural_net.load(filename) {
-        let snapshot = neural_net.clone();
-        drop(neural_net);
-        managed.store.persist_force(&snapshot);
-    }
-
-}
-
 impl NeuralNetwork<TextNodeController, TextDendrite> {
-
     pub fn new() -> Self {
         Self::with_controller(TextNodeController)
     }
@@ -269,5 +226,4 @@ impl NeuralNetwork<TextNodeController, TextDendrite> {
     pub fn insert(&mut self, content: &str, language: &str, dendrite_type: DendriteType) {
         self.insert_content(content, language, dendrite_type)
     }
-
 }

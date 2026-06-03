@@ -1,14 +1,10 @@
 
-use crate::helpers::textdendrite::DendriteType;
+use crate::helpers::text_dendrite::DendriteType;
 use crate::helpers::nodenet::{NetworkNode, NodeNetworkController};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use std::collections::{HashMap, HashSet};
-use std::fs;
-
-
-const NEURON_BIN_MAGIC: [u8; 4] = *b"NRN3";
 
 
 // code for the core data structures and logic of the neural network
@@ -136,32 +132,6 @@ where
         self.candidate_uids_for_token(token_key).as_slice().to_vec()
     }
 
-    pub fn load(&mut self, filename: &str) -> bool {
-
-        if let Ok(bytes) = fs::read(filename) {
-
-            if bytes.len() >= 4 && bytes[0..4] == NEURON_BIN_MAGIC
-                && let Ok(loaded) = bincode::deserialize::<NeuralNetwork<C, N>>(&bytes[4..])
-            {
-                *self = loaded;
-                self.rebuild_connection_indexes();
-                self.rebuild_token_index();
-                return true;
-            }
-
-            if let Ok(loaded) = serde_json::from_slice::<NeuralNetwork<C, N>>(&bytes) {
-                *self = loaded;
-                self.rebuild_connection_indexes();
-                self.rebuild_token_index();
-                return true;
-            }
-
-        }
-
-        false
-        
-    }
-
     pub fn all_dendrites_sorted(&self) -> Vec<N> {
         
         let mut dendrites: Vec<N> = self.dendrites.values().cloned().collect();
@@ -172,17 +142,6 @@ where
 
     pub fn enumerate_children(&self, data: &str) -> Vec<N> {
         collect_children_from_network(&self.dendrites, data)
-    }
-
-    pub fn save(&self, filename: &str) {
-
-        if let Ok(encoded) = bincode::serialize(self) {
-            let mut bytes = Vec::with_capacity(NEURON_BIN_MAGIC.len() + encoded.len());
-            bytes.extend_from_slice(&NEURON_BIN_MAGIC);
-            bytes.extend_from_slice(&encoded);
-            let _ = fs::write(filename, bytes);
-        }
-
     }
 
     pub fn with_controller(controller: C) -> Self {

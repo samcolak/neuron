@@ -1,8 +1,9 @@
 
 pub mod neuralnet;
-pub mod network_store;
-pub mod textneuralnet;
+pub mod text_network_store;
+pub mod text_network_registry;
+pub mod text_neuralnet;
 pub mod nodenet;
 pub mod controllers;
 pub mod axon;
-pub mod textdendrite;
+pub mod text_dendrite;

@@ -1,6 +1,6 @@
 
 use crate::helpers::axon::Axon;
-use crate::helpers::textdendrite::DendriteType;
+use crate::helpers::text_dendrite::DendriteType;
 
 pub trait NetworkNode {
     fn new_node(data: &str, language: &str, dendrite_type: DendriteType) -> Self

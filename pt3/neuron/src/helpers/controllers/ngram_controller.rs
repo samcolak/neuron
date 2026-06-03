@@ -1,5 +1,5 @@
 
-use crate::helpers::textdendrite::DendriteType;
+use crate::helpers::text_dendrite::DendriteType;
 use crate::helpers::neuralnet::NeuralNetwork;
 use crate::helpers::nodenet::{
     NetworkNode,
@@ -191,7 +191,7 @@ where
 mod tests {
 
     use super::*;
-    use crate::helpers::textdendrite::TextDendrite;
+    use crate::helpers::text_dendrite::TextDendrite;
     use crate::helpers::nodenet::NodeNetwork;
 
     #[test]

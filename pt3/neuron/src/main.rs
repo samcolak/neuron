@@ -12,12 +12,12 @@ mod helpers;
 
 use std::{collections::HashMap, env, time::Instant};
 
-use helpers::textdendrite::TextDendrite;
-use helpers::textneuralnet::TextNeuralNetwork;
+use helpers::text_dendrite::TextDendrite;
+use helpers::text_network_registry::TextNeuralNetwork;
 use helpers::controllers::ngram_controller::NgramController;
 use helpers::neuralnet::NeuralNetwork;
 use helpers::nodenet::NodeNetwork;
-use helpers::textneuralnet::{
+use helpers::text_network_registry::{
     neuralnet_enumerate,
     neuralnet_first_hit_metrics,
     neuralnet_flush,
@@ -25,7 +25,7 @@ use helpers::textneuralnet::{
     neuralnet_store_metrics,
 };
 
-use crate::helpers::textdendrite::DendriteType;
+use crate::helpers::text_dendrite::DendriteType;
 
 fn sample_corpus() -> Vec<&'static str> {
 
