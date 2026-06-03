@@ -1,5 +1,6 @@
 
 use crate::helpers::axon::Axon;
+use crate::helpers::nodenet::NetworkNode;
 
 use uuid::Uuid;
 
@@ -17,6 +18,22 @@ pub enum DendriteType {
     Token = 253,
     StopWord = 254,
     Other = 255,
+}
+
+impl std::fmt::Display for DendriteType {
+
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let type_str = match self {
+            DendriteType::Unknown => "Unknown",
+            DendriteType::Question => "Question",
+            DendriteType::Statement => "Statement",
+            DendriteType::Token => "Token",
+            DendriteType::StopWord => "StopWord",
+            DendriteType::Other => "Other",
+        };
+        write!(f, "{}", type_str)
+    }
+    
 }
 
 
@@ -45,7 +62,7 @@ fn normalize_data_key(input: &str) -> String {
 // Dendrite represents the receiving end of a connection in a neural network. It can have multiple connections (Axons) coming into it, and it holds some data.
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Dendrite {
+pub struct TextDendrite {
     pub uid: String,
     pub connections: Vec<Axon>,
     pub data: String,
@@ -59,7 +76,7 @@ pub struct Dendrite {
 }
 
 
-impl Dendrite {
+impl TextDendrite {
 
     pub fn unique_id() -> String {    
         Uuid::now_v7().to_string().replace("-", "")    
@@ -102,6 +119,49 @@ impl Dendrite {
         let inserted_index = self.connections.len() - 1;
         self.connection_index.insert(other, inserted_index);
         
+    }
+
+}
+
+impl NetworkNode for TextDendrite {
+
+    fn new_node(data: &str, language: &str, dendrite_type: DendriteType) -> Self {
+        Self::new(data, language, dendrite_type)
+    }
+
+    fn uid(&self) -> &str {
+        &self.uid
+    }
+
+    fn data(&self) -> &str {
+        &self.data
+    }
+
+    fn normalized_key(&self) -> &str {
+        &self.normalized_key
+    }
+
+    fn set_normalized_key(&mut self, normalized_key: String) {
+        self.normalized_key = normalized_key;
+    }
+
+    fn connections(&self) -> &[Axon] {
+        &self.connections
+    }
+
+    fn connect(&mut self, other: String, weight: i64) {
+        self.connect(other, weight);
+    }
+
+    fn has_connection_to(&self, to_uid: &str) -> bool {
+        self.connection_index.contains_key(to_uid)
+    }
+
+    fn rebuild_connection_index(&mut self) {
+        self.connection_index.clear();
+        for (idx, connection) in self.connections.iter().enumerate() {
+            self.connection_index.insert(connection.to.clone(), idx);
+        }
     }
 
 }

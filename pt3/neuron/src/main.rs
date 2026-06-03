@@ -10,66 +10,174 @@
 
 mod helpers;
 
-use std::{collections::HashMap};
+use std::{collections::HashMap, env, time::Instant};
 
+use helpers::textdendrite::TextDendrite;
+use helpers::controllers::ngram_controller::NgramController;
 use helpers::neuralnet::NeuralNetwork;
+use helpers::nodenet::NodeNetwork;
 
-use crate::helpers::dendrite::DendriteType;
+use crate::helpers::textdendrite::DendriteType;
 
-fn main() {
-    
+fn sample_corpus() -> Vec<&'static str> {
+
+    vec![
+        "the quick brown fox jumps over the lazy dog",
+        "the sun rises over the horizon above the ocean",
+        "the moon shines brightly in the night sky",
+        "the stars twinkle in the vast expanse of space",
+        "the river flows gently through the valley",
+        "the mountain stands tall against the sky",
+        "sunlight filters through the leaves of the trees",
+        "the ocean waves crash against the shore",
+        "the city lights illuminate the night",
+        "the flowers bloom in the springtime",
+        "winter snow blankets the landscape in white",
+        "lakes reflect the beauty of the surrounding nature",
+        "the horizon changes into the night",
+        "my view on the world is shaped by my experiences",
+        "quick brown dogs are often seen in the park",
+        "moonlight casts a serene glow over the countryside",
+        "the stars guide travelers through the night",
+        "the river's gentle flow soothes the soul",
+        "the mountain's majestic presence inspires awe",
+        "sunlight warms the earth and nurtures life",
+        "the ocean's vastness holds countless mysteries",
+        "the city buzzes with energy and excitement",
+        "the flowers' vibrant colors brighten the day",
+        "the quick brown goat jumps over the lazy cat",
+    ]
+
+}
+
+fn speed_enabled() -> bool {
+    match env::var("NEURON_ENABLE_SPEED") {
+        Ok(value) => {
+            let normalized = value.trim().to_ascii_lowercase();
+            normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on"
+        }
+        Err(_) => false,
+    }
+}
+
+fn speed_iterations() -> usize {
+    env::var("NEURON_SPEED_ITERATIONS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(200)
+}
+
+fn run_text_demo(corpus: &[&str], enable_speed: bool, iterations: usize) {
+
     let mut network = NeuralNetwork::new();
 
-    // network.insert("the quick brown fox jumps over the lazy dog", "en", DendriteType::Statement);    
-    // network.insert("the sun rises over the horizon above the ocean", "en", DendriteType::Statement);
-    // network.insert("the moon shines brightly in the night sky", "en", DendriteType::Statement);
-    // network.insert("the stars twinkle in the vast expanse of space", "en", DendriteType::Statement);
-    // network.insert("the river flows gently through the valley", "en", DendriteType::Statement);
-    // network.insert("the mountain stands tall against the sky", "en", DendriteType::Statement);
-    // network.insert("sunlight filters through the leaves of the trees", "en", DendriteType::Statement);
-    // network.insert("the ocean waves crash against the shore", "en", DendriteType::Statement);
-    // network.insert("the city lights illuminate the night", "en", DendriteType::Statement);
-    // network.insert("the flowers bloom in the springtime", "en", DendriteType::Statement);
-    // network.insert("winter snow blankets the landscape in white", "en", DendriteType::Statement);
-    // network.insert("lakes reflect the beauty of the surrounding nature", "en", DendriteType::Statement);
-    // network.insert("the horizon changes into the night", "en", DendriteType::Statement);
-    // network.insert("my view on the world is shaped by my experiences", "en", DendriteType::Statement);
-    // network.insert("quick brown dogs are often seen in the park", "en", DendriteType::Statement);
-    // network.insert("moonlight casts a serene glow over the countryside", "en", DendriteType::Statement);
-    // network.insert("the stars guide travelers through the night", "en", DendriteType::Statement);
-    // network.insert("the river's gentle flow soothes the soul", "en", DendriteType::Statement);
-    // network.insert("the mountain's majestic presence inspires awe", "en", DendriteType::Statement);
-    // network.insert("sunlight warms the earth and nurtures life", "en", DendriteType::Statement);
-    // network.insert("the ocean's vastness holds countless mysteries", "en", DendriteType::Statement);
-    // network.insert("the city buzzes with energy and excitement", "en", DendriteType::Statement);
-    // network.insert("the flowers' vibrant colors brighten the day", "en", DendriteType::Statement);
-    // network.insert("the quick brown goat jumps over the lazy cat", "en", DendriteType::Statement);
-
-    // network.save("testing.bin");
-    network.load("testing.bin");
+    for phrase in corpus {
+        network.insert(phrase, "en", DendriteType::Statement);
+    }
 
     let dendrites = network.all_dendrites_sorted();
-
     let dendrite_by_uid: HashMap<&str, &str> = dendrites
         .iter()
         .map(|d| (d.uid.as_str(), d.data.as_str()))
         .collect();
 
-    dendrites.iter().for_each(|d| {
-        println!("Dendrite: {} | {}", d.data, d.dendrite_type as u8);
+    println!("Text controller: {} nodes", dendrites.len());
+
+    for d in dendrites.iter().take(5) {
+        println!("  Dendrite: {} | {}", d.data, d.dendrite_type as u8);
         for synapse in &d.connections {
             if let Some(connecting_data) = dendrite_by_uid.get(synapse.to.as_str()) {
-                println!("  Synapse: {} (weight: {})", connecting_data, synapse.weight);
+                println!("    Synapse: {} (weight: {})", connecting_data, synapse.weight);
             }
         }
-    });
+    }
 
-    network.enumerate_children("lakes").iter().for_each(|d| {
-        println!("Child Dendrite: {}", d.data);
-    });
+    if enable_speed {
 
-    network.enumerate_path("the stars").1.iter().for_each(|d| {
-        println!("Path Dendrite: {}", d.data);
-    });
+        let mut speed_network = NeuralNetwork::new();
+        let insert_start = Instant::now();
+        for _ in 0..iterations {
+            for phrase in corpus {
+                speed_network.insert(phrase, "en", DendriteType::Statement);
+            }
+        }
+        let insert_elapsed = insert_start.elapsed();
+
+        let query_start = Instant::now();
+        for _ in 0..iterations {
+            let _ = speed_network.enumerate_path("the stars");
+        }
+        let query_elapsed = query_start.elapsed();
+
+        println!(
+            "Text speed: insert={}ms query={}ms (iterations={})",
+            insert_elapsed.as_millis(),
+            query_elapsed.as_millis(),
+            iterations
+        );
+    
+    }
+
+}
+
+fn run_ngram_demo(corpus: &[&str], enable_speed: bool, iterations: usize) {
+
+    let mut network: NeuralNetwork<NgramController, TextDendrite> =
+        NeuralNetwork::with_controller(NgramController);
+
+    for phrase in corpus {
+        network.insert_content(phrase, "en", DendriteType::Token);
+    }
+
+    let nodes = network.all_dendrites_sorted();
+    
+    println!("Ngram controller: {} nodes", nodes.len());
+
+    for node in nodes.iter().take(8) {
+        println!("  Ngram node: {}", node.data);
+    }
+
+    if enable_speed {
+
+        let mut speed_network: NeuralNetwork<NgramController, TextDendrite> =
+            NeuralNetwork::with_controller(NgramController);
+
+        let insert_start = Instant::now();
+        for _ in 0..iterations {
+            for phrase in corpus {
+                speed_network.insert_content(phrase, "en", DendriteType::Token);
+            }
+        }
+        let insert_elapsed = insert_start.elapsed();
+
+        let query_start = Instant::now();
+        for _ in 0..iterations {
+            let _ = speed_network.enumerate_path_content("neuralnetwork");
+        }
+        let query_elapsed = query_start.elapsed();
+
+        println!(
+            "Ngram speed: insert={}ms query={}ms (iterations={})",
+            insert_elapsed.as_millis(),
+            query_elapsed.as_millis(),
+            iterations
+        );
+
+    }
+
+}
+
+fn main() {
+    
+    let corpus = sample_corpus();
+    let enable_speed = speed_enabled();
+    let iterations = speed_iterations();
+
+    println!("Controller comparison demo");
+    println!("Speed checks enabled: {}", enable_speed);
+
+    run_text_demo(&corpus, enable_speed, iterations);
+    run_ngram_demo(&corpus, enable_speed, iterations);
 
 }
