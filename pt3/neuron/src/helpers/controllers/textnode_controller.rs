@@ -1,11 +1,33 @@
 use crate::helpers::textdendrite::DendriteType;
 use crate::helpers::neuralnet::NeuralNetwork;
 use crate::helpers::nodenet::{NetworkNode, NodeNetwork, NodeNetworkController, TokenClusterKeyStrategy};
+
 use serde::{de::DeserializeOwned, Serialize};
 use std::collections::HashSet;
+use std::env;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone, Default)]
 pub struct TextNodeController;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FirstHitMetrics {
+    pub attempted: u64,
+    pub accepted: u64,
+    pub fallback: u64,
+}
+
+static FIRST_HIT_ATTEMPTED: AtomicU64 = AtomicU64::new(0);
+static FIRST_HIT_ACCEPTED: AtomicU64 = AtomicU64::new(0);
+static FIRST_HIT_FALLBACK: AtomicU64 = AtomicU64::new(0);
+
+pub fn get_first_hit_metrics() -> FirstHitMetrics {
+    FirstHitMetrics {
+        attempted: FIRST_HIT_ATTEMPTED.load(Ordering::Relaxed),
+        accepted: FIRST_HIT_ACCEPTED.load(Ordering::Relaxed),
+        fallback: FIRST_HIT_FALLBACK.load(Ordering::Relaxed),
+    }
+}
 
 fn normalized_levenshtein(a: &str, b: &str) -> f64 {
 
@@ -212,6 +234,22 @@ fn stop_words_for_language(language: &str) -> Vec<&'static str> {
 
 }
 
+fn first_hit_min_candidates() -> usize {
+    env::var("NEURON_FIRST_HIT_MIN_CANDIDATES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(1)
+}
+
+fn first_hit_min_edge_weight() -> i64 {
+    env::var("NEURON_FIRST_HIT_MIN_EDGE_WEIGHT")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(1)
+}
+
 impl NodeNetworkController for TextNodeController {
     type Content = str;
 
@@ -341,6 +379,26 @@ where
             let candidates = neural_net.candidate_uids_for_token_vec(token_key);
             if candidates.is_empty() {
                 return None;
+            }
+
+            let mut attempted_first_hit = false;
+
+            if let Some(prev) = previous_uid
+                && candidates.len() >= first_hit_min_candidates()
+            {
+                attempted_first_hit = true;
+                FIRST_HIT_ATTEMPTED.fetch_add(1, Ordering::Relaxed);
+                let min_weight = first_hit_min_edge_weight();
+
+                if let Some(uid) = neural_net.best_connected_candidate_uid(prev, &candidates, min_weight)
+                {
+                    FIRST_HIT_ACCEPTED.fetch_add(1, Ordering::Relaxed);
+                    return Some(uid);
+                }
+            }
+
+            if attempted_first_hit {
+                FIRST_HIT_FALLBACK.fetch_add(1, Ordering::Relaxed);
             }
 
             let next_candidates = next_token_key

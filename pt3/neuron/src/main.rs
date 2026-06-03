@@ -17,6 +17,13 @@ use helpers::textneuralnet::TextNeuralNetwork;
 use helpers::controllers::ngram_controller::NgramController;
 use helpers::neuralnet::NeuralNetwork;
 use helpers::nodenet::NodeNetwork;
+use helpers::textneuralnet::{
+    neuralnet_enumerate,
+    neuralnet_first_hit_metrics,
+    neuralnet_flush,
+    neuralnet_insert,
+    neuralnet_store_metrics,
+};
 
 use crate::helpers::textdendrite::DendriteType;
 
@@ -67,6 +74,16 @@ fn speed_iterations() -> usize {
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|v| *v > 0)
         .unwrap_or(200)
+}
+
+fn singleton_metrics_demo_enabled() -> bool {
+    match env::var("NEURON_SINGLETON_METRICS_DEMO") {
+        Ok(value) => {
+            let normalized = value.trim().to_ascii_lowercase();
+            normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on"
+        }
+        Err(_) => false,
+    }
 }
 
 fn run_text_demo(corpus: &[&str], enable_speed: bool, iterations: usize) {
@@ -148,14 +165,17 @@ fn run_ngram_demo(corpus: &[&str], enable_speed: bool, iterations: usize) {
             NeuralNetwork::with_controller(NgramController);
 
         let insert_start = Instant::now();
+
         for _ in 0..iterations {
             for phrase in corpus {
                 speed_network.insert_content(phrase, "en", DendriteType::Token);
             }
         }
+
         let insert_elapsed = insert_start.elapsed();
 
         let query_start = Instant::now();
+        
         for _ in 0..iterations {
             let _ = speed_network.enumerate_path_content("neuralnetwork");
         }
@@ -172,6 +192,55 @@ fn run_ngram_demo(corpus: &[&str], enable_speed: bool, iterations: usize) {
 
 }
 
+fn print_runtime_metrics() {
+    let store = neuralnet_store_metrics();
+    let first_hit = neuralnet_first_hit_metrics();
+
+    println!("Runtime store metrics:");
+    println!(
+        "  mode={} flush_every={} flush_interval_ms={} pending_writes={}",
+        if store.buffered_mode { "buffered" } else { "sync" },
+        store.flush_every,
+        store.flush_interval_ms,
+        store.pending_writes,
+    );
+    println!(
+        "  persist_requests={} flush_writes={} forced_flush_writes={}",
+        store.persist_requests,
+        store.flush_writes,
+        store.forced_flush_writes,
+    );
+    println!(
+        "  load_attempts={} load_successes={} total_flush_bytes={} last_flush_bytes={} last_flush_latency_us={}",
+        store.load_attempts,
+        store.load_successes,
+        store.total_flush_bytes,
+        store.last_flush_bytes,
+        store.last_flush_latency_micros,
+    );
+
+    println!("First-hit metrics:");
+    println!(
+        "  attempted={} accepted={} fallback={}",
+        first_hit.attempted,
+        first_hit.accepted,
+        first_hit.fallback,
+    );
+
+    println!(
+        "  Note: these counters track the global textneuralnet singleton APIs, not local TextNeuralNetwork::new() demo instances."
+    );
+}
+
+fn run_singleton_metrics_demo(corpus: &[&str]) {
+    for phrase in corpus.iter().take(6) {
+        neuralnet_insert(phrase, "en", DendriteType::Statement);
+    }
+
+    let _ = neuralnet_enumerate("the");
+    neuralnet_flush();
+}
+
 fn main() {
     
     let corpus = sample_corpus();
@@ -181,7 +250,12 @@ fn main() {
     println!("Controller comparison demo");
     println!("Speed checks enabled: {}", enable_speed);
 
+    if singleton_metrics_demo_enabled() {
+        run_singleton_metrics_demo(&corpus);
+    }
+
     run_text_demo(&corpus, enable_speed, iterations);
     run_ngram_demo(&corpus, enable_speed, iterations);
+    print_runtime_metrics();
 
 }

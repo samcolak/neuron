@@ -1,5 +1,4 @@
 
-
 use crate::helpers::textdendrite::DendriteType;
 use crate::helpers::nodenet::{NetworkNode, NodeNetworkController};
 
@@ -275,6 +274,32 @@ where
             .get(from_uid)
             .map(|from| from.has_connection_to(to_uid))
             .unwrap_or(false)
+    }
+
+    pub(crate) fn direct_connection_weight(&self, from_uid: &str, to_uid: &str) -> Option<i64> {
+        let from_node = self.dendrites.get(from_uid)?;
+        from_node
+            .connections()
+            .iter()
+            .find(|conn| conn.to == to_uid)
+            .map(|conn| conn.weight)
+    }
+
+    pub(crate) fn best_connected_candidate_uid(
+        &self,
+        from_uid: &str,
+        candidate_uids: &[String],
+        min_weight: i64,
+    ) -> Option<String> {
+        let from_node = self.dendrites.get(from_uid)?;
+        let candidate_set: HashSet<&str> = candidate_uids.iter().map(String::as_str).collect();
+
+        from_node
+            .connections()
+            .iter()
+            .filter(|conn| conn.weight >= min_weight && candidate_set.contains(conn.to.as_str()))
+            .max_by_key(|conn| conn.weight)
+            .map(|conn| conn.to.clone())
     }
 
     pub(crate) fn connected_uid_by_key(&self, from_uid: &str, target_key: &str) -> Option<String> {

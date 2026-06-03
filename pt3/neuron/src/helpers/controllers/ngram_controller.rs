@@ -1,3 +1,4 @@
+
 use crate::helpers::textdendrite::DendriteType;
 use crate::helpers::neuralnet::NeuralNetwork;
 use crate::helpers::nodenet::{
@@ -6,6 +7,7 @@ use crate::helpers::nodenet::{
     NodeNetworkController,
     TokenClusterKeyStrategy,
 };
+
 use serde::{de::DeserializeOwned, Serialize};
 use std::collections::HashSet;
 
@@ -21,7 +23,9 @@ fn normalize_for_ngram(input: &str) -> String {
 }
 
 impl TokenClusterKeyStrategy for NgramController {
+
     fn cluster_key_for_token(&self, token_key: &str) -> Option<String> {
+
         if token_key.is_empty() {
             return None;
         }
@@ -36,10 +40,13 @@ impl TokenClusterKeyStrategy for NgramController {
         };
 
         Some(format!("{}:{}", prefix, len_bucket))
+
     }
+
 }
 
 impl NodeNetworkController for NgramController {
+
     type Content = str;
 
     fn tokenize(&self, content: &Self::Content) -> Vec<String> {
@@ -76,6 +83,7 @@ impl NodeNetworkController for NgramController {
     fn stop_words(&self, _language: &str) -> Vec<&'static str> {
         Vec::new()
     }
+
 }
 
 impl<N> NodeNetwork<NgramController> for NeuralNetwork<NgramController, N>
@@ -85,6 +93,7 @@ where
     type Node = N;
 
     fn enumerate_path_content(&self, content: &str) -> (Option<N>, Vec<N>) {
+
         let path_tokens: Vec<String> = self
             .tokenize_content(content)
             .into_iter()
@@ -99,6 +108,7 @@ where
         let mut current_uids = self.candidate_uids_for_token_vec(&path_tokens[0]);
 
         for segment_key in &path_tokens[1..] {
+
             let target_uids = self.candidate_uids_for_token_vec(segment_key);
 
             if target_uids.is_empty() {
@@ -124,6 +134,7 @@ where
             if current_uids.is_empty() {
                 return (None, Vec::new());
             }
+
         }
 
         if let Some(last_uid) = current_uids.last()
@@ -139,9 +150,11 @@ where
         }
 
         (None, Vec::new())
+
     }
 
     fn insert_content(&mut self, content: &str, language: &str, dendrite_type: DendriteType) {
+
         self.ensure_token_index();
 
         let tokens = self.tokenize_content(content);
@@ -169,11 +182,14 @@ where
         for pair in chosen_path.windows(2) {
             self.connect_dendrites(&pair[0], &pair[1], 1);
         }
+    
     }
+
 }
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::helpers::textdendrite::TextDendrite;
     use crate::helpers::nodenet::NodeNetwork;
