@@ -13,6 +13,7 @@ mod helpers;
 use std::{collections::HashMap, env, time::Instant};
 
 use helpers::textdendrite::TextDendrite;
+use helpers::textneuralnet::TextNeuralNetwork;
 use helpers::controllers::ngram_controller::NgramController;
 use helpers::neuralnet::NeuralNetwork;
 use helpers::nodenet::NodeNetwork;
@@ -70,7 +71,7 @@ fn speed_iterations() -> usize {
 
 fn run_text_demo(corpus: &[&str], enable_speed: bool, iterations: usize) {
 
-    let mut network = NeuralNetwork::new();
+    let mut network = TextNeuralNetwork::new();
 
     for phrase in corpus {
         network.insert(phrase, "en", DendriteType::Statement);
@@ -95,19 +96,22 @@ fn run_text_demo(corpus: &[&str], enable_speed: bool, iterations: usize) {
 
     if enable_speed {
 
-        let mut speed_network = NeuralNetwork::new();
+        let mut speed_network = TextNeuralNetwork::new();
+
         let insert_start = Instant::now();
         for _ in 0..iterations {
             for phrase in corpus {
                 speed_network.insert(phrase, "en", DendriteType::Statement);
             }
         }
+        
         let insert_elapsed = insert_start.elapsed();
-
         let query_start = Instant::now();
+
         for _ in 0..iterations {
             let _ = speed_network.enumerate_path("the stars");
         }
+        
         let query_elapsed = query_start.elapsed();
 
         println!(

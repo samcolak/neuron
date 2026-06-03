@@ -1,37 +1,21 @@
 
 
-use crate::helpers::textdendrite::{TextDendrite, DendriteType};
+use crate::helpers::textdendrite::DendriteType;
 use crate::helpers::nodenet::{NetworkNode, NodeNetworkController};
-use crate::helpers::controllers::textnode_controller::TextNodeController;
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
 
-const NEURON_BIN_MAGIC: [u8; 4] = *b"NRN2";
 
-#[allow(unused_imports)]
-pub use crate::helpers::textneuralnet::{
-    get_neural_network,
-    get_neural_network_read,
-    get_neural_network_write,
-    neuralnet_add_dendrite,
-    neuralnet_enumerate,
-    neuralnet_enumerate_dendrites,
-    neuralnet_insert,
-    neuralnet_load,
-    neuralnet_save,
-    TextNeuralNetwork,
-};
-
-
+const NEURON_BIN_MAGIC: [u8; 4] = *b"NRN3";
 
 
 // code for the core data structures and logic of the neural network
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NeuralNetwork<C = TextNodeController, N = TextDendrite>
+pub struct NeuralNetwork<C, N>
 where
     C: NodeNetworkController,
     N: NetworkNode,

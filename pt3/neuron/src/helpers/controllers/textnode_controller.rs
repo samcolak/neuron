@@ -486,8 +486,10 @@ mod tests {
     use crate::helpers::textdendrite::TextDendrite;
     use std::path::PathBuf;
 
-    fn seeded_network(entries: &[(&str, &str)]) -> NeuralNetwork {
-        let mut network = NeuralNetwork::new();
+    type TextTestNetwork = NeuralNetwork<TextNodeController, TextDendrite>;
+
+    fn seeded_network(entries: &[(&str, &str)]) -> TextTestNetwork {
+        let mut network = TextTestNetwork::new();
         for (uid, data) in entries {
             let mut dendrite = TextDendrite::new(*data, "en", DendriteType::Token);
             dendrite.uid = (*uid).to_string();
@@ -535,7 +537,7 @@ mod tests {
 
     #[test]
     fn enumerate_path_can_use_clustered_token_fallback() {
-        let mut network = NeuralNetwork::new();
+        let mut network = TextTestNetwork::new();
         network.insert("hello world", "en", DendriteType::Token);
 
         let (node, optional_path) = network.enumerate_path("hello wurld");
@@ -548,7 +550,7 @@ mod tests {
 
     #[test]
     fn insert_keeps_map_key_and_dendrite_uid_in_sync() {
-        let mut network = NeuralNetwork::new();
+        let mut network = TextTestNetwork::new();
         network.insert("alpha beta gamma", "en", DendriteType::Token);
 
         assert!(network
@@ -559,7 +561,7 @@ mod tests {
 
     #[test]
     fn insert_without_match_creates_single_dendrite() {
-        let mut network = NeuralNetwork::new();
+        let mut network = TextTestNetwork::new();
         network.insert("alpha", "en", DendriteType::Token);
 
         assert_eq!(network.dendrites().len(), 1);
@@ -639,7 +641,7 @@ mod tests {
 
     #[test]
     fn insert_stop_words_do_not_reuse_single_global_node() {
-        let mut network = NeuralNetwork::new();
+        let mut network = TextTestNetwork::new();
         network.insert("the cat", "en", DendriteType::Statement);
         network.insert("the dog", "en", DendriteType::Statement);
 
@@ -654,7 +656,7 @@ mod tests {
 
     #[test]
     fn insert_reuses_existing_stop_word_edge_for_same_predecessor() {
-        let mut network = NeuralNetwork::new();
+        let mut network = TextTestNetwork::new();
         network.insert("through the valley", "en", DendriteType::Statement);
         network.insert("through the leaves", "en", DendriteType::Statement);
 
@@ -681,7 +683,7 @@ mod tests {
 
     #[test]
     fn insert_increments_weight_on_repeated_traversal() {
-        let mut network = NeuralNetwork::new();
+        let mut network = TextTestNetwork::new();
         network.insert("hello world", "en", DendriteType::Statement);
         network.insert("hello world", "en", DendriteType::Statement);
 
@@ -708,7 +710,7 @@ mod tests {
 
     #[test]
     fn enumerate_children_returns_instance_children() {
-        let mut network = NeuralNetwork::new();
+        let mut network = TextTestNetwork::new();
         network.insert("the mountain stands tall", "en", DendriteType::Statement);
 
         let children = network.enumerate_children("mountain");
@@ -718,7 +720,7 @@ mod tests {
 
     #[test]
     fn save_and_load_round_trip_binary() {
-        let mut network = NeuralNetwork::new();
+        let mut network = TextTestNetwork::new();
         network.insert("alpha beta", "en", DendriteType::Statement);
 
         let mut path: PathBuf = std::env::temp_dir();
@@ -726,7 +728,7 @@ mod tests {
         let filename = path.to_string_lossy().to_string();
 
         network.save(&filename);
-        let mut loaded = NeuralNetwork::new();
+        let mut loaded = TextTestNetwork::new();
         loaded.load(&filename);
 
         assert_eq!(loaded.all_dendrites_sorted().len(), network.all_dendrites_sorted().len());
@@ -736,7 +738,7 @@ mod tests {
 
     #[test]
     fn load_legacy_json_is_still_supported() {
-        let mut network = NeuralNetwork::new();
+        let mut network = TextTestNetwork::new();
         network.insert("legacy format", "en", DendriteType::Statement);
 
         let mut path: PathBuf = std::env::temp_dir();
@@ -746,7 +748,7 @@ mod tests {
         let json = serde_json::to_vec(&network).expect("expected to serialize json");
         std::fs::write(&filename, json).expect("expected to write legacy json");
 
-        let mut loaded = NeuralNetwork::new();
+        let mut loaded = TextTestNetwork::new();
         assert!(loaded.load(&filename));
         assert_eq!(loaded.all_dendrites_sorted().len(), network.all_dendrites_sorted().len());
 
