@@ -10,6 +10,7 @@ pub struct NodeMetadata {
 }
 
 impl NodeMetadata {
+
     pub fn new() -> Self {
         Self {
             attributes: HashMap::new(),
@@ -32,9 +33,11 @@ impl NodeMetadata {
             .get(&key.trim().to_ascii_lowercase())
             .map(String::as_str)
     }
+
 }
 
 pub trait NetworkNode {
+    
     fn new_node(data: &str, metadata: &NodeMetadata, dendrite_type: DendriteType) -> Self
     where
         Self: Sized;

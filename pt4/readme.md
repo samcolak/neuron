@@ -7,4 +7,10 @@ Defining 2 networks for a cognative and storage like format mirroring the semant
 
 ## Changes in Pt.4
 
-* More information coming soon !
+* Moved to a library model
+* Legacy code removed
+* Reduced dependancy graph
+* BRAINS
+* Added snapshot mechanisms in code
+* Moved text comparison into text_simularity.rs
+* And more...
