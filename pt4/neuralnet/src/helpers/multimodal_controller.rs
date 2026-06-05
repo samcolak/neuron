@@ -1,4 +1,4 @@
-use crate::helpers::nodenet::{NodeMetadata, NodeNetworkController, TokenClusterKeyStrategy};
+use crate::core::nodenet::{NodeMetadata, NodeNetworkController, TokenClusterKeyStrategy};
 use crate::helpers::text_similarity::{evaluate_fuzziness, normalize_for_fuzzy_comparison};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

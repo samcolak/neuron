@@ -8,10 +8,11 @@
 #![allow(clippy::absolute_paths, reason = "")]
 #![allow(clippy::clone_on_ref_ptr, reason = "")]
 
-use neuralnet::helpers::brain::MultiModalNeuralNetwork;
-use neuralnet::helpers::brain::QuestionStoreDecision;
+use neuralnet::core::brain::MultiModalNeuralNetwork;
+use neuralnet::core::brain::QuestionStoreDecision;
+use neuralnet::core::nodenet::NodeMetadata;
+
 use neuralnet::helpers::multimodal_controller::MultiModalInput;
-use neuralnet::helpers::nodenet::NodeMetadata;
 
 use neuralnet::dendrites::text_dendrite::DendriteType;
 

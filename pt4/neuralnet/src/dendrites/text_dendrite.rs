@@ -1,5 +1,5 @@
 use crate::helpers::axon::Axon;
-use crate::helpers::nodenet::{NetworkNode, NodeMetadata};
+use crate::core::nodenet::{NetworkNode, NodeMetadata};
 
 use uuid::Uuid;
 
