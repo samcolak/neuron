@@ -28,22 +28,24 @@ where
     controller: C,
 }
 
-enum CandidateUidSet<'a> {
+pub(crate) enum CandidateUidSet<'a> {
     Borrowed(&'a [String]),
     Owned(Vec<String>),
 }
 
 impl<'a> CandidateUidSet<'a> {
-    fn is_empty(&self) -> bool {
+
+    pub(crate) fn is_empty(&self) -> bool {
         self.as_slice().is_empty()
     }
 
-    fn as_slice(&self) -> &[String] {
+    pub(crate) fn as_slice(&self) -> &[String] {
         match self {
             CandidateUidSet::Borrowed(items) => items,
             CandidateUidSet::Owned(items) => items.as_slice(),
         }
     }
+
 }
 
 fn collect_children_from_network<N>(dendrites: &HashMap<String, N>, data: &str) -> Vec<N>
@@ -83,7 +85,8 @@ where
         &self.controller
     }
 
-    fn candidate_uids_for_token<'a>(&'a self, token_key: &str) -> CandidateUidSet<'a> {
+    pub(crate) fn candidate_uids_for_token<'a>(&'a self, token_key: &str) -> CandidateUidSet<'a> {
+        
         if let Some(exact_matches) = self.token_index.get(token_key) {
             return CandidateUidSet::Borrowed(exact_matches.as_slice());
         }

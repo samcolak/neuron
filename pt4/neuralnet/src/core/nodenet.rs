@@ -57,6 +57,7 @@ pub trait NetworkNode {
     fn connect(&mut self, other: String, weight: i64);
     fn has_connection_to(&self, to_uid: &str) -> bool;
     fn rebuild_connection_index(&mut self);
+
 }
 
 pub trait TokenClusterKeyStrategy {

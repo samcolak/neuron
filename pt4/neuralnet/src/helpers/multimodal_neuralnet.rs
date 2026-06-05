@@ -21,31 +21,39 @@ where
     type Node = N;
 
     fn enumerate_path_content(&self, content: &MultiModalInput) -> (Option<N>, Vec<N>) {
-        let path_tokens: Vec<String> = self
+
+        let mut path_tokens = self
             .tokenize_content(content)
             .into_iter()
             .map(|token| self.token_key_for_index(&token))
-            .filter(|token| !token.is_empty())
-            .collect();
+            .filter(|token| !token.is_empty());
 
-        if path_tokens.is_empty() {
+        let Some(first_token) = path_tokens.next() else {
+            return (None, Vec::new());
+        };
+
+        let mut current_uids = self.candidate_uids_for_token(&first_token).as_slice().to_vec();
+
+        if current_uids.is_empty() {
             return (None, Vec::new());
         }
 
-        let mut current_uids = self.candidate_uids_for_token_vec(&path_tokens[0]);
+        let dendrites = self.dendrites();
 
-        for segment_key in &path_tokens[1..] {
-            let target_uids = self.candidate_uids_for_token_vec(segment_key);
+        for segment_key in path_tokens {
+
+            let target_uids = self.candidate_uids_for_token(&segment_key);
 
             if target_uids.is_empty() {
                 return (None, Vec::new());
             }
 
-            let target_uid_set: HashSet<&str> = target_uids.iter().map(String::as_str).collect();
-            let mut next_uids = Vec::new();
+            let target_uid_set: HashSet<&str> = target_uids.as_slice().iter().map(String::as_str).collect();
+            let mut next_uids = Vec::with_capacity(current_uids.len());
 
             for uid in &current_uids {
-                let Some(node) = self.dendrites().get(uid) else {
+
+                let Some(node) = dendrites.get(uid) else {
                     continue;
                 };
 
@@ -54,20 +62,22 @@ where
                         next_uids.push(connection.to.clone());
                     }
                 }
+
             }
 
             current_uids = next_uids;
             if current_uids.is_empty() {
                 return (None, Vec::new());
             }
+
         }
 
         if let Some(last_uid) = current_uids.last()
-            && let Some(last) = self.dendrites().get(last_uid)
+            && let Some(last) = dendrites.get(last_uid)
         {
             let mut optional_path = Vec::new();
             for connection in last.connections() {
-                if let Some(next) = self.dendrites().get(&connection.to) {
+                if let Some(next) = dendrites.get(&connection.to) {
                     optional_path.push(next.clone());
                 }
             }
@@ -75,6 +85,7 @@ where
         }
 
         (None, Vec::new())
+        
     }
 
     fn insert_content(

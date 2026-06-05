@@ -23,6 +23,7 @@ pub struct MultimodalDendrite {
 impl MultimodalDendrite {
 
     pub fn new(data: &str, metadata: &NodeMetadata, dendrite_type: DendriteType) -> Self {
+        
         let uid = Self::unique_id();
         let normalized_key = data.trim().to_ascii_lowercase();
 
@@ -42,9 +43,11 @@ impl MultimodalDendrite {
             normalized_key,
             connection_index: HashMap::new(),
         }
+
     }
 
     pub fn connect(&mut self, other: String, weight: i64) {
+
         if let Some(existing_index) = self.connection_index.get(&other).copied()
             && let Some(existing_connection) = self.connections.get_mut(existing_index)
         {
@@ -61,6 +64,7 @@ impl MultimodalDendrite {
         self.connections.push(connection);
         let inserted_index = self.connections.len() - 1;
         self.connection_index.insert(other, inserted_index);
+        
     }
 
 }

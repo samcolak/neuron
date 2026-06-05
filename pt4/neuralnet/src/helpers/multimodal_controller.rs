@@ -100,9 +100,11 @@ impl TokenClusterKeyStrategy for MultiModalController {
 }
 
 impl NodeNetworkController for MultiModalController {
+
     type Content = MultiModalInput;
 
     fn tokenize(&self, content: &Self::Content) -> Vec<String> {
+
         match content {
             MultiModalInput::Text(text) => tokenize_text(text),
             MultiModalInput::ImageBytes(bytes) => tokenize_image(bytes),
@@ -116,6 +118,7 @@ impl NodeNetworkController for MultiModalController {
                 .filter(|token| token != ":")
                 .collect(),
         }
+        
     }
 
     fn normalize_token(&self, token: &str) -> String {
