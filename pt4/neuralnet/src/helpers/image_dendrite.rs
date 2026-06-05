@@ -1,73 +1,18 @@
-
 use crate::helpers::axon::Axon;
-use crate::helpers::nodenet::NetworkNode;
+use crate::helpers::nodenet::{NetworkNode, NodeMetadata};
+use crate::helpers::text_dendrite::DendriteType;
 
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use uuid::Uuid;
 
-use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
-
-
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, Default)]
-#[repr(u8)]
-pub enum DendriteType {
-    #[default]
-    Unknown = 0,
-    Question = 1,
-    Statement = 2,
-    Token = 253,
-    StopWord = 254,
-    Other = 255,
-}
-
-impl std::fmt::Display for DendriteType {
-
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let type_str = match self {
-            DendriteType::Unknown => "Unknown",
-            DendriteType::Question => "Question",
-            DendriteType::Statement => "Statement",
-            DendriteType::Token => "Token",
-            DendriteType::StopWord => "StopWord",
-            DendriteType::Other => "Other",
-        };
-        write!(f, "{}", type_str)
-    }
-    
-}
-
-
-fn normalize_data_key(input: &str) -> String {
-
-    let lowered = input.to_lowercase();
-    let normalized: String = lowered
-        .chars()
-        .map(|ch| {
-            if ch.is_alphanumeric() || ch.is_whitespace() {
-                ch
-            } else {
-                ' '
-            }
-        })
-        .collect();
-
-    normalized
-        .split_whitespace()
-        .collect::<Vec<&str>>()
-        .join(" ")
-
-}
-
-
-// Dendrite represents the receiving end of a connection in a neural network. It can have multiple connections (Axons) coming into it, and it holds some data.
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TextDendrite {
+pub struct ImageDendrite {
     pub uid: String,
     pub connections: Vec<Axon>,
     pub data: String,
-    pub result: Option<String>,
-    pub lang: String,
+    pub feature_type: String,
+    pub metadata: NodeMetadata,
     pub dendrite_type: DendriteType,
     #[serde(skip, default)]
     pub normalized_key: String,
@@ -75,33 +20,28 @@ pub struct TextDendrite {
     pub connection_index: HashMap<String, usize>,
 }
 
-
-impl TextDendrite {
-
-    pub fn unique_id() -> String {    
-        Uuid::now_v7().to_string().replace("-", "")    
+impl ImageDendrite {
+    fn unique_id() -> String {
+        Uuid::now_v7().to_string().replace('-', "")
     }
 
-    pub fn new(data: &str, lang: &str, dendrite_type: DendriteType) -> Self {
-        
+    pub fn new(data: &str, metadata: &NodeMetadata, dendrite_type: DendriteType) -> Self {
         let uid = Self::unique_id();
-        let normalized_key = normalize_data_key(&data);
-        
+        let normalized_key = data.trim().to_ascii_lowercase();
+
         Self {
             uid,
             connections: Vec::new(),
             data: data.to_string(),
-            lang: lang.to_string(),
+            feature_type: "image_feature".to_string(),
+            metadata: metadata.clone(),
             dendrite_type,
             normalized_key,
-            result: None,
             connection_index: HashMap::new(),
         }
-        
     }
 
     pub fn connect(&mut self, other: String, weight: i64) {
-
         if let Some(existing_index) = self.connection_index.get(&other).copied()
             && let Some(existing_connection) = self.connections.get_mut(existing_index)
         {
@@ -114,19 +54,16 @@ impl TextDendrite {
             to: other.clone(),
             weight,
         };
-        
+
         self.connections.push(connection);
         let inserted_index = self.connections.len() - 1;
         self.connection_index.insert(other, inserted_index);
-        
     }
-
 }
 
-impl NetworkNode for TextDendrite {
-
-    fn new_node(data: &str, language: &str, dendrite_type: DendriteType) -> Self {
-        Self::new(data, language, dendrite_type)
+impl NetworkNode for ImageDendrite {
+    fn new_node(data: &str, metadata: &NodeMetadata, dendrite_type: DendriteType) -> Self {
+        Self::new(data, metadata, dendrite_type)
     }
 
     fn uid(&self) -> &str {
@@ -163,5 +100,4 @@ impl NetworkNode for TextDendrite {
             self.connection_index.insert(connection.to.clone(), idx);
         }
     }
-
 }

@@ -1,14 +1,14 @@
-use crate::helpers::controllers::textnode_controller::{
-    evaluate_fuzziness,
-    normalize_for_fuzzy_comparison,
-};
-use crate::helpers::nodenet::{NodeNetworkController, TokenClusterKeyStrategy};
+use crate::helpers::nodenet::{NodeMetadata, NodeNetworkController, TokenClusterKeyStrategy};
+use crate::helpers::text_similarity::{evaluate_fuzziness, normalize_for_fuzzy_comparison};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MultiModalInput {
     Text(String),
     ImageBytes(Vec<u8>),
-    FeatureTokens { modality: String, tokens: Vec<String> },
+    FeatureTokens {
+        modality: String,
+        tokens: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -150,7 +150,7 @@ impl NodeNetworkController for MultiModalController {
         }
     }
 
-    fn stop_words(&self, _language: &str) -> Vec<&'static str> {
+    fn stop_words(&self, _metadata: &NodeMetadata) -> Vec<&'static str> {
         Vec::new()
     }
 }

@@ -1,7 +1,4 @@
-
-
-use serde::{Serialize, Deserialize};
-
+use serde::{Deserialize, Serialize};
 
 // Axon represents the sending end of a connection in a neural network. It connects one Dendrite to another and has a weight associated with it.
 
@@ -13,9 +10,7 @@ pub struct Axon {
 }
 
 impl Axon {
-    
     pub fn new(from: String, to: String, weight: i64) -> Self {
         Self { from, to, weight }
     }
-
 }

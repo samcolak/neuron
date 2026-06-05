@@ -1,27 +1,27 @@
 use crate::helpers::neuralnet::NeuralNetwork;
-use crate::helpers::nodenet::{NetworkNode, NodeNetwork, NodeNetworkController, TokenClusterKeyStrategy};
+use crate::helpers::nodenet::{
+    NetworkNode, NodeMetadata, NodeNetwork, NodeNetworkController, TokenClusterKeyStrategy,
+};
 use crate::helpers::text_dendrite::DendriteType;
 
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, Default)]
 pub struct ImageNodeController;
 
 fn mean_bucket(chunk: &[u8]) -> u8 {
-
     if chunk.is_empty() {
         return 0;
     }
 
     let sum: u32 = chunk.iter().map(|v| *v as u32).sum();
     let mean = sum / chunk.len() as u32;
-    (mean / 16) as u8
 
+    (mean / 16) as u8
 }
 
 fn edge_bucket(chunk: &[u8]) -> u8 {
-
     if chunk.len() < 2 {
         return 0;
     }
@@ -35,12 +35,11 @@ fn edge_bucket(chunk: &[u8]) -> u8 {
     }
 
     let avg_delta = total_delta / (chunk.len() as u32 - 1);
-    (avg_delta / 16) as u8
 
+    (avg_delta / 16) as u8
 }
 
 impl TokenClusterKeyStrategy for ImageNodeController {
-
     fn cluster_key_for_token(&self, token_key: &str) -> Option<String> {
         if token_key.is_empty() {
             return None;
@@ -56,11 +55,9 @@ impl TokenClusterKeyStrategy for ImageNodeController {
 
         Some(format!("{}:{}", family, value))
     }
-
 }
 
 impl NodeNetworkController for ImageNodeController {
-
     type Content = [u8];
 
     fn tokenize(&self, content: &Self::Content) -> Vec<String> {
@@ -104,17 +101,15 @@ impl NodeNetworkController for ImageNodeController {
         }
     }
 
-    fn stop_words(&self, _language: &str) -> Vec<&'static str> {
+    fn stop_words(&self, _metadata: &NodeMetadata) -> Vec<&'static str> {
         Vec::new()
     }
-
 }
 
 impl<N> NodeNetwork<ImageNodeController> for NeuralNetwork<ImageNodeController, N>
 where
     N: NetworkNode + Clone + Serialize + DeserializeOwned,
 {
-
     type Node = N;
 
     fn enumerate_path_content(&self, content: &[u8]) -> (Option<N>, Vec<N>) {
@@ -172,10 +167,14 @@ where
         }
 
         (None, Vec::new())
-
     }
 
-    fn insert_content(&mut self, content: &[u8], language: &str, dendrite_type: DendriteType) {
+    fn insert_content(
+        &mut self,
+        content: &[u8],
+        metadata: &NodeMetadata,
+        dendrite_type: DendriteType,
+    ) {
         self.ensure_token_index();
 
         let tokens = self.tokenize_content(content);
@@ -195,7 +194,7 @@ where
                 .candidate_uids_for_token_vec(&token_key)
                 .into_iter()
                 .next()
-                .unwrap_or_else(|| self.insert_dendrite_and_index(&token, language, dendrite_type));
+                .unwrap_or_else(|| self.insert_dendrite_and_index(&token, metadata, dendrite_type));
 
             chosen_path.push(uid);
         }
@@ -204,11 +203,11 @@ where
             self.connect_dendrites(&pair[0], &pair[1], 1);
         }
     }
-    
 }
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::helpers::image_dendrite::ImageDendrite;
     use crate::helpers::nodenet::NodeNetwork;
@@ -235,7 +234,7 @@ mod tests {
             image.push((i % 255) as u8);
         }
 
-        network.insert_content(&image, "img", DendriteType::Token);
+        network.insert_content(&image, &NodeMetadata::with_lang("img"), DendriteType::Token);
 
         let all = network.all_dendrites_sorted();
         assert!(!all.is_empty());

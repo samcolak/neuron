@@ -1,14 +1,10 @@
-
-use crate::helpers::text_dendrite::DendriteType;
 use crate::helpers::neuralnet::NeuralNetwork;
 use crate::helpers::nodenet::{
-    NetworkNode,
-    NodeNetwork,
-    NodeNetworkController,
-    TokenClusterKeyStrategy,
+    NetworkNode, NodeMetadata, NodeNetwork, NodeNetworkController, TokenClusterKeyStrategy,
 };
+use crate::helpers::text_dendrite::DendriteType;
 
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, Default)]
@@ -23,9 +19,7 @@ fn normalize_for_ngram(input: &str) -> String {
 }
 
 impl TokenClusterKeyStrategy for NgramController {
-
     fn cluster_key_for_token(&self, token_key: &str) -> Option<String> {
-
         if token_key.is_empty() {
             return None;
         }
@@ -40,13 +34,10 @@ impl TokenClusterKeyStrategy for NgramController {
         };
 
         Some(format!("{}:{}", prefix, len_bucket))
-
     }
-
 }
 
 impl NodeNetworkController for NgramController {
-
     type Content = str;
 
     fn tokenize(&self, content: &Self::Content) -> Vec<String> {
@@ -80,10 +71,9 @@ impl NodeNetworkController for NgramController {
         }
     }
 
-    fn stop_words(&self, _language: &str) -> Vec<&'static str> {
+    fn stop_words(&self, _metadata: &NodeMetadata) -> Vec<&'static str> {
         Vec::new()
     }
-
 }
 
 impl<N> NodeNetwork<NgramController> for NeuralNetwork<NgramController, N>
@@ -93,7 +83,6 @@ where
     type Node = N;
 
     fn enumerate_path_content(&self, content: &str) -> (Option<N>, Vec<N>) {
-
         let path_tokens: Vec<String> = self
             .tokenize_content(content)
             .into_iter()
@@ -108,7 +97,6 @@ where
         let mut current_uids = self.candidate_uids_for_token_vec(&path_tokens[0]);
 
         for segment_key in &path_tokens[1..] {
-
             let target_uids = self.candidate_uids_for_token_vec(segment_key);
 
             if target_uids.is_empty() {
@@ -134,7 +122,6 @@ where
             if current_uids.is_empty() {
                 return (None, Vec::new());
             }
-
         }
 
         if let Some(last_uid) = current_uids.last()
@@ -150,11 +137,14 @@ where
         }
 
         (None, Vec::new())
-
     }
 
-    fn insert_content(&mut self, content: &str, language: &str, dendrite_type: DendriteType) {
-
+    fn insert_content(
+        &mut self,
+        content: &str,
+        metadata: &NodeMetadata,
+        dendrite_type: DendriteType,
+    ) {
         self.ensure_token_index();
 
         let tokens = self.tokenize_content(content);
@@ -174,7 +164,7 @@ where
                 .candidate_uids_for_token_vec(&token_key)
                 .into_iter()
                 .next()
-                .unwrap_or_else(|| self.insert_dendrite_and_index(&token, language, dendrite_type));
+                .unwrap_or_else(|| self.insert_dendrite_and_index(&token, metadata, dendrite_type));
 
             chosen_path.push(uid);
         }
@@ -182,17 +172,15 @@ where
         for pair in chosen_path.windows(2) {
             self.connect_dendrites(&pair[0], &pair[1], 1);
         }
-    
     }
-
 }
 
 #[cfg(test)]
 mod tests {
 
     use super::*;
-    use crate::helpers::text_dendrite::TextDendrite;
     use crate::helpers::nodenet::NodeNetwork;
+    use crate::helpers::text_dendrite::TextDendrite;
 
     #[test]
     fn tokenize_produces_character_trigrams() {
@@ -207,7 +195,11 @@ mod tests {
         let mut network: NeuralNetwork<NgramController, TextDendrite> =
             NeuralNetwork::with_controller(NgramController);
 
-        network.insert_content("neural", "en", DendriteType::Token);
+        network.insert_content(
+            "neural",
+            &NodeMetadata::with_lang("en"),
+            DendriteType::Token,
+        );
 
         let all = network.all_dendrites_sorted();
         assert!(all.len() >= 4);

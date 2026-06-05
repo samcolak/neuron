@@ -1,14 +1,14 @@
-use crate::helpers::controllers::textnode_controller::TextNodeController;
+use crate::helpers::legacy::textnode_controller::TextNodeController;
 use crate::helpers::neuralnet::NeuralNetwork;
 use crate::helpers::text_dendrite::TextDendrite;
 
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 type TextNeuralNetwork = NeuralNetwork<TextNodeController, TextDendrite>;
@@ -21,7 +21,8 @@ where
     N: crate::helpers::nodenet::NetworkNode + Clone + Serialize + DeserializeOwned,
 {
     if let Ok(bytes) = fs::read(filename) {
-        if bytes.len() >= 4 && bytes[0..4] == NEURON_BIN_MAGIC
+        if bytes.len() >= 4
+            && bytes[0..4] == NEURON_BIN_MAGIC
             && let Ok(loaded) = bincode::deserialize::<NeuralNetwork<C, N>>(&bytes[4..])
         {
             *network = loaded;

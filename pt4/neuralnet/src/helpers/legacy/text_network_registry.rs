@@ -1,18 +1,14 @@
-use crate::helpers::controllers::textnode_controller::{
-    get_first_hit_metrics,
-    FirstHitMetrics,
-    TextNodeController,
+use crate::helpers::legacy::textnode_controller::{
+    FirstHitMetrics, TextNodeController, get_first_hit_metrics,
 };
 
-use crate::helpers::text_network_store::{
-    build_text_network_store_for_network,
-    TextNetworkStore,
-    TextNetworkStoreMetrics,
+use crate::helpers::legacy::text_network_store::{
+    TextNetworkStore, TextNetworkStoreMetrics, build_text_network_store_for_network,
 };
 
-use crate::helpers::text_dendrite::{DendriteType, TextDendrite};
 use crate::helpers::neuralnet::NeuralNetwork;
-use crate::helpers::nodenet::NodeNetwork;
+use crate::helpers::nodenet::{NodeMetadata, NodeNetwork};
+use crate::helpers::text_dendrite::{DendriteType, TextDendrite};
 
 use lazy_static::lazy_static;
 
@@ -54,12 +50,7 @@ fn resolve_network_id(network_id: &str) -> String {
 fn get_or_create_network(network_id: &str) -> Arc<ManagedTextNetwork> {
     let resolved_id = resolve_network_id(network_id);
 
-    if let Some(existing) = NETWORK_REGISTRY
-        .read()
-        .unwrap()
-        .get(&resolved_id)
-        .cloned()
-    {
+    if let Some(existing) = NETWORK_REGISTRY.read().unwrap().get(&resolved_id).cloned() {
         return existing;
     }
 
@@ -84,19 +75,19 @@ lazy_static! {
     };
 }
 
-pub fn neuralnet_add_dendrite(data: &str, language: &str, dendrite_type: DendriteType) {
-    neuralnet_add_dendrite_for(DEFAULT_NETWORK_ID, data, language, dendrite_type);
+pub fn neuralnet_add_dendrite(data: &str, metadata: &NodeMetadata, dendrite_type: DendriteType) {
+    neuralnet_add_dendrite_for(DEFAULT_NETWORK_ID, data, metadata, dendrite_type);
 }
 
 pub fn neuralnet_add_dendrite_for(
     network_id: &str,
     data: &str,
-    language: &str,
+    metadata: &NodeMetadata,
     dendrite_type: DendriteType,
 ) {
     let managed = get_or_create_network(network_id);
     let mut neural_net = managed.network.write().unwrap();
-    let _ = neural_net.insert_dendrite_and_index(data, language, dendrite_type);
+    let _ = neural_net.insert_dendrite_and_index(data, metadata, dendrite_type);
     let snapshot = neural_net.clone();
     drop(neural_net);
     managed.store.persist(&snapshot);
@@ -122,19 +113,19 @@ pub fn neuralnet_enumerate_for(network_id: &str, data: &str) -> Vec<TextDendrite
     neural_net.enumerate_children(data)
 }
 
-pub fn neuralnet_insert(content: &str, language: &str, dendrite_type: DendriteType) {
-    neuralnet_insert_for(DEFAULT_NETWORK_ID, content, language, dendrite_type);
+pub fn neuralnet_insert(content: &str, metadata: &NodeMetadata, dendrite_type: DendriteType) {
+    neuralnet_insert_for(DEFAULT_NETWORK_ID, content, metadata, dendrite_type);
 }
 
 pub fn neuralnet_insert_for(
     network_id: &str,
     content: &str,
-    language: &str,
+    metadata: &NodeMetadata,
     dendrite_type: DendriteType,
 ) {
     let managed = get_or_create_network(network_id);
     let mut neural_net = managed.network.write().unwrap();
-    neural_net.insert(content, language, dendrite_type);
+    neural_net.insert(content, metadata, dendrite_type);
     let snapshot = neural_net.clone();
     drop(neural_net);
     managed.store.persist(&snapshot);
@@ -167,10 +158,7 @@ pub fn neuralnet_first_hit_metrics() -> FirstHitMetrics {
 
 pub fn neuralnet_is_loaded(network_id: &str) -> bool {
     let resolved_id = resolve_network_id(network_id);
-    NETWORK_REGISTRY
-        .read()
-        .unwrap()
-        .contains_key(&resolved_id)
+    NETWORK_REGISTRY.read().unwrap().contains_key(&resolved_id)
 }
 
 pub fn neuralnet_preload() {
@@ -182,12 +170,7 @@ pub fn neuralnet_preload_for(network_id: &str) {
 }
 
 pub fn neuralnet_loaded_network_ids() -> Vec<String> {
-    let mut network_ids: Vec<String> = NETWORK_REGISTRY
-        .read()
-        .unwrap()
-        .keys()
-        .cloned()
-        .collect();
+    let mut network_ids: Vec<String> = NETWORK_REGISTRY.read().unwrap().keys().cloned().collect();
     network_ids.sort();
     network_ids
 }
@@ -223,7 +206,7 @@ impl NeuralNetwork<TextNodeController, TextDendrite> {
         self.enumerate_path_content(data)
     }
 
-    pub fn insert(&mut self, content: &str, language: &str, dendrite_type: DendriteType) {
-        self.insert_content(content, language, dendrite_type)
+    pub fn insert(&mut self, content: &str, metadata: &NodeMetadata, dendrite_type: DendriteType) {
+        self.insert_content(content, metadata, dendrite_type)
     }
 }

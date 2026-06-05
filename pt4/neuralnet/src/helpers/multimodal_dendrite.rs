@@ -1,5 +1,5 @@
 use crate::helpers::axon::Axon;
-use crate::helpers::nodenet::NetworkNode;
+use crate::helpers::nodenet::{NetworkNode, NodeMetadata};
 use crate::helpers::text_dendrite::DendriteType;
 
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,7 @@ pub struct MultimodalDendrite {
     pub connections: Vec<Axon>,
     pub data: String,
     pub modality: String,
-    pub lang: String,
+    pub metadata: NodeMetadata,
     pub dendrite_type: DendriteType,
     #[serde(skip, default)]
     pub normalized_key: String,
@@ -21,12 +21,11 @@ pub struct MultimodalDendrite {
 }
 
 impl MultimodalDendrite {
-
     fn unique_id() -> String {
         Uuid::now_v7().to_string().replace('-', "")
     }
 
-    pub fn new(data: &str, lang: &str, dendrite_type: DendriteType) -> Self {
+    pub fn new(data: &str, metadata: &NodeMetadata, dendrite_type: DendriteType) -> Self {
         let uid = Self::unique_id();
         let normalized_key = data.trim().to_ascii_lowercase();
 
@@ -41,7 +40,7 @@ impl MultimodalDendrite {
             connections: Vec::new(),
             data: data.to_string(),
             modality,
-            lang: lang.to_string(),
+            metadata: metadata.clone(),
             dendrite_type,
             normalized_key,
             connection_index: HashMap::new(),
@@ -66,13 +65,11 @@ impl MultimodalDendrite {
         let inserted_index = self.connections.len() - 1;
         self.connection_index.insert(other, inserted_index);
     }
-
 }
 
 impl NetworkNode for MultimodalDendrite {
-    
-    fn new_node(data: &str, language: &str, dendrite_type: DendriteType) -> Self {
-        Self::new(data, language, dendrite_type)
+    fn new_node(data: &str, metadata: &NodeMetadata, dendrite_type: DendriteType) -> Self {
+        Self::new(data, metadata, dendrite_type)
     }
 
     fn uid(&self) -> &str {
@@ -109,5 +106,4 @@ impl NetworkNode for MultimodalDendrite {
             self.connection_index.insert(connection.to.clone(), idx);
         }
     }
-
 }

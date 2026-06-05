@@ -1,14 +1,11 @@
-use crate::helpers::controllers::multimodal_controller::{
-    MultiModalController,
-    MultiModalInput,
-};
-use crate::helpers::image_io::{load_png_or_jpeg_from_path, ImageIoError};
+use crate::helpers::image_io::{ImageIoError, load_png_or_jpeg_from_path};
+use crate::helpers::multimodal_controller::{MultiModalController, MultiModalInput};
 use crate::helpers::multimodal_dendrite::MultimodalDendrite;
 use crate::helpers::neuralnet::NeuralNetwork;
-use crate::helpers::nodenet::{NetworkNode, NodeNetwork};
+use crate::helpers::nodenet::{NetworkNode, NodeMetadata, NodeNetwork};
 use crate::helpers::text_dendrite::DendriteType;
 
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -21,7 +18,6 @@ where
     type Node = N;
 
     fn enumerate_path_content(&self, content: &MultiModalInput) -> (Option<N>, Vec<N>) {
-        
         let path_tokens: Vec<String> = self
             .tokenize_content(content)
             .into_iter()
@@ -78,8 +74,12 @@ where
         (None, Vec::new())
     }
 
-    fn insert_content(&mut self, content: &MultiModalInput, language: &str, dendrite_type: DendriteType) {
-
+    fn insert_content(
+        &mut self,
+        content: &MultiModalInput,
+        metadata: &NodeMetadata,
+        dendrite_type: DendriteType,
+    ) {
         self.ensure_token_index();
 
         let tokens = self.tokenize_content(content);
@@ -99,7 +99,7 @@ where
                 .candidate_uids_for_token_vec(&token_key)
                 .into_iter()
                 .next()
-                .unwrap_or_else(|| self.insert_dendrite_and_index(&token, language, dendrite_type));
+                .unwrap_or_else(|| self.insert_dendrite_and_index(&token, metadata, dendrite_type));
 
             chosen_path.push(uid);
         }
@@ -107,9 +107,7 @@ where
         for pair in chosen_path.windows(2) {
             self.connect_dendrites(&pair[0], &pair[1], 1);
         }
-
     }
-
 }
 
 impl NeuralNetwork<MultiModalController, MultimodalDendrite> {
@@ -117,8 +115,13 @@ impl NeuralNetwork<MultiModalController, MultimodalDendrite> {
         Self::with_controller(MultiModalController)
     }
 
-    pub fn insert_multimodal(&mut self, content: &MultiModalInput, language: &str, dendrite_type: DendriteType) {
-        self.insert_content(content, language, dendrite_type);
+    pub fn insert_multimodal(
+        &mut self,
+        content: &MultiModalInput,
+        metadata: &NodeMetadata,
+        dendrite_type: DendriteType,
+    ) {
+        self.insert_content(content, metadata, dendrite_type);
     }
 
     pub fn enumerate_multimodal_path(
@@ -128,47 +131,78 @@ impl NeuralNetwork<MultiModalController, MultimodalDendrite> {
         self.enumerate_path_content(content)
     }
 
-    pub fn insert_text(&mut self, text: &str, language: &str, dendrite_type: DendriteType) {
-        self.insert_multimodal(&MultiModalInput::Text(text.to_string()), language, dendrite_type);
+    pub fn insert_text(
+        &mut self,
+        text: &str,
+        metadata: &NodeMetadata,
+        dendrite_type: DendriteType,
+    ) {
+        self.insert_multimodal(
+            &MultiModalInput::Text(text.to_string()),
+            metadata,
+            dendrite_type,
+        );
     }
 
-    pub fn enumerate_text_path(&self, text: &str) -> (Option<MultimodalDendrite>, Vec<MultimodalDendrite>) {
+    pub fn enumerate_text_path(
+        &self,
+        text: &str,
+    ) -> (Option<MultimodalDendrite>, Vec<MultimodalDendrite>) {
         self.enumerate_multimodal_path(&MultiModalInput::Text(text.to_string()))
     }
 
-    pub fn insert_image_bytes(&mut self, bytes: &[u8], language: &str, dendrite_type: DendriteType) {
-        self.insert_multimodal(&MultiModalInput::ImageBytes(bytes.to_vec()), language, dendrite_type);
+    pub fn insert_image_bytes(
+        &mut self,
+        bytes: &[u8],
+        metadata: &NodeMetadata,
+        dendrite_type: DendriteType,
+    ) {
+        self.insert_multimodal(
+            &MultiModalInput::ImageBytes(bytes.to_vec()),
+            metadata,
+            dendrite_type,
+        );
     }
 
-    pub fn enumerate_image_bytes_path(&self, bytes: &[u8]) -> (Option<MultimodalDendrite>, Vec<MultimodalDendrite>) {
+    pub fn enumerate_image_bytes_path(
+        &self,
+        bytes: &[u8],
+    ) -> (Option<MultimodalDendrite>, Vec<MultimodalDendrite>) {
         self.enumerate_multimodal_path(&MultiModalInput::ImageBytes(bytes.to_vec()))
     }
 
     pub fn insert_image_from_file(
         &mut self,
         path: &Path,
-        language: &str,
+        metadata: &NodeMetadata,
         dendrite_type: DendriteType,
     ) -> Result<(), ImageIoError> {
         let image_buffer = load_png_or_jpeg_from_path(path)?;
-        self.insert_image_bytes(image_buffer.as_slice(), language, dendrite_type);
+        self.insert_image_bytes(image_buffer.as_slice(), metadata, dendrite_type);
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]
     fn multimodal_subnetwork_accepts_text_and_image_content() {
         let mut network = MultiModalSubNetwork::new_multimodal();
+        let metadata = NodeMetadata::with_lang("en");
+        let image_bytes = [12u8; 128];
 
-        network.insert_text("neuron learns", "en", DendriteType::Statement);
-        network.insert_image_bytes(&vec![12u8; 128], "img", DendriteType::Token);
+        network.insert_text("neuron learns", &metadata, DendriteType::Statement);
+        network.insert_image_bytes(
+            &image_bytes,
+            &NodeMetadata::with_lang("img"),
+            DendriteType::Token,
+        );
 
         let text_query = network.enumerate_text_path("neuron learns");
-        let image_query = network.enumerate_image_bytes_path(&vec![12u8; 128]);
+        let image_query = network.enumerate_image_bytes_path(&image_bytes);
 
         assert!(text_query.0.is_some());
         assert!(image_query.0.is_some());
@@ -183,7 +217,11 @@ mod tests {
             tokens: vec!["mfcc0:0a".to_string(), "mfcc1:1f".to_string()],
         };
 
-        network.insert_multimodal(&audio, "audio", DendriteType::Token);
+        network.insert_multimodal(
+            &audio,
+            &NodeMetadata::with_lang("audio"),
+            DendriteType::Token,
+        );
         let result = network.enumerate_multimodal_path(&audio);
 
         assert!(result.0.is_some());

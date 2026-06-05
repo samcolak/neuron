@@ -1,11 +1,9 @@
-
+use crate::helpers::nodenet::{NetworkNode, NodeMetadata, NodeNetworkController};
 use crate::helpers::text_dendrite::DendriteType;
-use crate::helpers::nodenet::{NetworkNode, NodeNetworkController};
 
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use std::collections::{HashMap, HashSet};
-
 
 // code for the core data structures and logic of the neural network
 
@@ -24,15 +22,12 @@ where
     controller: C,
 }
 
-
 enum CandidateUidSet<'a> {
     Borrowed(&'a [String]),
     Owned(Vec<String>),
 }
 
-
 impl<'a> CandidateUidSet<'a> {
-
     fn is_empty(&self) -> bool {
         self.as_slice().is_empty()
     }
@@ -43,18 +38,12 @@ impl<'a> CandidateUidSet<'a> {
             CandidateUidSet::Owned(items) => items.as_slice(),
         }
     }
-
 }
 
-
-fn collect_children_from_network<N>(
-    dendrites: &HashMap<String, N>,
-    data: &str,
-) -> Vec<N>
+fn collect_children_from_network<N>(dendrites: &HashMap<String, N>, data: &str) -> Vec<N>
 where
     N: NetworkNode + Clone,
 {
-
     let mut children = Vec::new();
     let mut seen_child_uids: HashSet<String> = HashSet::new();
 
@@ -71,13 +60,11 @@ where
     children
 }
 
-
 impl<C, N> NeuralNetwork<C, N>
 where
     C: NodeNetworkController,
     N: NetworkNode + Clone + Serialize + DeserializeOwned,
 {
-
     pub(crate) fn token_key_for_index(&self, data: &str) -> String {
         self.controller.normalize_token(data)
     }
@@ -91,7 +78,6 @@ where
     }
 
     fn candidate_uids_for_token<'a>(&'a self, token_key: &str) -> CandidateUidSet<'a> {
-
         if let Some(exact_matches) = self.token_index.get(token_key) {
             return CandidateUidSet::Borrowed(exact_matches.as_slice());
         }
@@ -104,28 +90,29 @@ where
             return CandidateUidSet::Owned(Vec::new());
         };
 
-        CandidateUidSet::Owned(cluster_matches
-            .iter()
-            .filter_map(|uid| {
-                let candidate = self.dendrites.get(uid)?;
-                let candidate_key_owned;
-                let candidate_key = if candidate.normalized_key().is_empty() {
-                    candidate_key_owned = self.token_key_for_index(candidate.data());
-                    candidate_key_owned.as_str()
-                } else {
-                    candidate.normalized_key()
-                };
+        CandidateUidSet::Owned(
+            cluster_matches
+                .iter()
+                .filter_map(|uid| {
+                    let candidate = self.dendrites.get(uid)?;
+                    let candidate_key_owned;
+                    let candidate_key = if candidate.normalized_key().is_empty() {
+                        candidate_key_owned = self.token_key_for_index(candidate.data());
+                        candidate_key_owned.as_str()
+                    } else {
+                        candidate.normalized_key()
+                    };
 
-                let (score, _) = self.controller.evaluate_match(token_key, candidate_key);
+                    let (score, _) = self.controller.evaluate_match(token_key, candidate_key);
 
-                if score >= 0.60 {
-                    Some(uid.clone())
-                } else {
-                    None
-                }
-            })
-            .collect())
-
+                    if score >= 0.60 {
+                        Some(uid.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+        )
     }
 
     pub(crate) fn candidate_uids_for_token_vec(&self, token_key: &str) -> Vec<String> {
@@ -187,11 +174,9 @@ where
     }
 
     pub fn all_dendrites_sorted(&self) -> Vec<N> {
-        
         let mut dendrites: Vec<N> = self.dendrites.values().cloned().collect();
         dendrites.sort_by(|a, b| a.uid().cmp(b.uid()));
         dendrites
-
     }
 
     pub fn enumerate_children(&self, data: &str) -> Vec<N> {
@@ -208,9 +193,7 @@ where
     }
 
     pub(crate) fn index_dendrite_token(&mut self, uid: &str) {
-
         if let Some(dendrite) = self.dendrites.get_mut(uid) {
-
             if dendrite.normalized_key().is_empty() {
                 dendrite.set_normalized_key(self.controller.normalize_token(dendrite.data()));
             }
@@ -232,20 +215,16 @@ where
                     .or_default()
                     .push(uid.to_string());
             }
-            
         }
-
     }
 
     pub(crate) fn rebuild_token_index(&mut self) {
-
         self.token_index.clear();
         self.token_cluster_index.clear();
-        
+
         let controller = self.controller.clone();
 
         for (uid, dendrite) in &mut self.dendrites {
-
             if dendrite.normalized_key().is_empty() {
                 dendrite.set_normalized_key(controller.normalize_token(dendrite.data()));
             }
@@ -256,7 +235,10 @@ where
                 continue;
             }
 
-            self.token_index.entry(key.clone()).or_default().push(uid.clone());
+            self.token_index
+                .entry(key.clone())
+                .or_default()
+                .push(uid.clone());
 
             if let Some(cluster_key) = controller.cluster_key_for_token(&key) {
                 self.token_cluster_index
@@ -265,15 +247,12 @@ where
                     .push(uid.clone());
             }
         }
-
     }
 
     pub(crate) fn rebuild_connection_indexes(&mut self) {
-
         for dendrite in self.dendrites.values_mut() {
             dendrite.rebuild_connection_index();
         }
-
     }
 
     pub(crate) fn ensure_token_index(&mut self) {
@@ -332,8 +311,13 @@ where
         })
     }
 
-    pub(crate) fn insert_dendrite_and_index(&mut self, data: &str, language: &str, dendrite_type: DendriteType) -> String {
-        let new_dendrite = N::new_node(data, language, dendrite_type);
+    pub(crate) fn insert_dendrite_and_index(
+        &mut self,
+        data: &str,
+        metadata: &NodeMetadata,
+        dendrite_type: DendriteType,
+    ) -> String {
+        let new_dendrite = N::new_node(data, metadata, dendrite_type);
         let new_uid = new_dendrite.uid().to_string();
         self.dendrites.insert(new_uid.clone(), new_dendrite);
         self.index_dendrite_token(&new_uid);
@@ -353,7 +337,4 @@ where
     pub(crate) fn dendrites_mut(&mut self) -> &mut HashMap<String, N> {
         &mut self.dendrites
     }
-
 }
-
-

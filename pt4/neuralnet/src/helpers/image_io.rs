@@ -38,7 +38,11 @@ impl fmt::Display for ImageIoError {
             ImageIoError::Io(err) => write!(f, "image I/O error: {}", err),
             ImageIoError::Decode(err) => write!(f, "image decode error: {}", err),
             ImageIoError::UnsupportedFormat(fmt_name) => {
-                write!(f, "unsupported image format: {} (only png/jpg/jpeg)", fmt_name)
+                write!(
+                    f,
+                    "unsupported image format: {} (only png/jpg/jpeg)",
+                    fmt_name
+                )
             }
         }
     }
@@ -92,9 +96,9 @@ pub fn load_png_or_jpeg_from_path(path: &Path) -> Result<ImageByteBuffer, ImageI
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{ColorType, ImageEncoder, RgbImage};
     use image::codecs::jpeg::JpegEncoder;
     use image::codecs::png::PngEncoder;
+    use image::{ColorType, ImageEncoder, RgbImage};
 
     fn sample_rgb() -> RgbImage {
         RgbImage::from_fn(4, 4, |x, y| {
