@@ -70,6 +70,7 @@ impl MultimodalDendrite {
 }
 
 impl NetworkNode for MultimodalDendrite {
+    
     fn new_node(data: &str, language: &str, dendrite_type: DendriteType) -> Self {
         Self::new(data, language, dendrite_type)
     }
@@ -108,5 +109,5 @@ impl NetworkNode for MultimodalDendrite {
             self.connection_index.insert(connection.to.clone(), idx);
         }
     }
-    
+
 }

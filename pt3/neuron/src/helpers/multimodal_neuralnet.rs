@@ -21,6 +21,7 @@ where
     type Node = N;
 
     fn enumerate_path_content(&self, content: &MultiModalInput) -> (Option<N>, Vec<N>) {
+        
         let path_tokens: Vec<String> = self
             .tokenize_content(content)
             .into_iter()
@@ -78,6 +79,7 @@ where
     }
 
     fn insert_content(&mut self, content: &MultiModalInput, language: &str, dendrite_type: DendriteType) {
+
         self.ensure_token_index();
 
         let tokens = self.tokenize_content(content);
@@ -105,10 +107,13 @@ where
         for pair in chosen_path.windows(2) {
             self.connect_dendrites(&pair[0], &pair[1], 1);
         }
+
     }
+
 }
 
 impl NeuralNetwork<MultiModalController, MultimodalDendrite> {
+
     pub fn new_multimodal() -> Self {
         Self::with_controller(MultiModalController)
     }
