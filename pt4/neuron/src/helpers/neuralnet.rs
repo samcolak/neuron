@@ -132,6 +132,60 @@ where
         self.candidate_uids_for_token(token_key).as_slice().to_vec()
     }
 
+    pub(crate) fn fuzzy_success_score_for_content(&self, content: &C::Content) -> f64 {
+        let tokens = self.tokenize_content(content);
+
+        if tokens.is_empty() || self.dendrites.is_empty() {
+            return -1.0;
+        }
+
+        let mut best_scores = Vec::new();
+
+        for token in tokens {
+            let token_key = self.token_key_for_index(&token);
+            if token_key.is_empty() {
+                continue;
+            }
+
+            let candidates = self.candidate_uids_for_token_vec(&token_key);
+            if candidates.is_empty() {
+                best_scores.push(0.0);
+                continue;
+            }
+
+            let mut token_best = 0.0;
+
+            for candidate_uid in candidates {
+                let Some(candidate) = self.dendrites.get(&candidate_uid) else {
+                    continue;
+                };
+
+                let candidate_key = if candidate.normalized_key().is_empty() {
+                    self.token_key_for_index(candidate.data())
+                } else {
+                    candidate.normalized_key().to_string()
+                };
+
+                let (score, _) = self.controller.evaluate_match(&token_key, &candidate_key);
+                if score > token_best {
+                    token_best = score;
+                }
+            }
+
+            best_scores.push(token_best);
+        }
+
+        if best_scores.is_empty() {
+            return -1.0;
+        }
+
+        if best_scores.iter().all(|score| *score <= 0.0) {
+            return -1.0;
+        }
+
+        best_scores.iter().copied().sum::<f64>() / best_scores.len() as f64
+    }
+
     pub fn all_dendrites_sorted(&self) -> Vec<N> {
         
         let mut dendrites: Vec<N> = self.dendrites.values().cloned().collect();
