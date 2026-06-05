@@ -1,5 +1,6 @@
 use crate::helpers::nodenet::{NetworkNode, NodeMetadata, NodeNetworkController};
-use crate::helpers::text_dendrite::DendriteType;
+
+use crate::dendrites::text_dendrite::DendriteType;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 

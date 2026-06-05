@@ -6,10 +6,10 @@ use std::path::PathBuf;
 
 use crate::helpers::image_io::{ImageIoError, load_png_or_jpeg_from_path};
 use crate::helpers::multimodal_controller::MultiModalInput;
-use crate::helpers::multimodal_dendrite::MultimodalDendrite;
 use crate::helpers::multimodal_neuralnet::MultiModalSubNetwork;
 use crate::helpers::nodenet::{NodeMetadata, NodeNetwork};
-use crate::helpers::text_dendrite::DendriteType;
+use crate::dendrites::text_dendrite::DendriteType;
+use crate::dendrites::multimodal_dendrite::MultimodalDendrite;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuestionStoreDecision {

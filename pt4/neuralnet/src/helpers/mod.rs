@@ -7,8 +7,5 @@ pub mod multimodal_neuralnet;
 
 pub mod axon;
 pub mod nodenet;
-
-pub mod image_dendrite;
 pub mod image_io;
-pub mod multimodal_dendrite;
-pub mod text_dendrite;
+

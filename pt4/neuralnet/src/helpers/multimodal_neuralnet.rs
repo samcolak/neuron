@@ -1,10 +1,11 @@
 
 use crate::helpers::image_io::{ImageIoError, load_png_or_jpeg_from_path};
 use crate::helpers::multimodal_controller::{MultiModalController, MultiModalInput};
-use crate::helpers::multimodal_dendrite::MultimodalDendrite;
 use crate::helpers::neuralnet::NeuralNetwork;
 use crate::helpers::nodenet::{NetworkNode, NodeMetadata, NodeNetwork};
-use crate::helpers::text_dendrite::DendriteType;
+
+use crate::dendrites::multimodal_dendrite::MultimodalDendrite;
+use crate::dendrites::text_dendrite::DendriteType;
 
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::HashSet;

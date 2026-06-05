@@ -1,17 +1,17 @@
 use crate::helpers::axon::Axon;
 use crate::helpers::nodenet::{NetworkNode, NodeMetadata};
-use crate::helpers::text_dendrite::DendriteType;
+use crate::dendrites::text_dendrite::DendriteType;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ImageDendrite {
+pub struct MultimodalDendrite {
     pub uid: String,
     pub connections: Vec<Axon>,
     pub data: String,
-    pub feature_type: String,
+    pub modality: String,
     pub metadata: NodeMetadata,
     pub dendrite_type: DendriteType,
     #[serde(skip, default)]
@@ -20,7 +20,7 @@ pub struct ImageDendrite {
     pub connection_index: HashMap<String, usize>,
 }
 
-impl ImageDendrite {
+impl MultimodalDendrite {
     fn unique_id() -> String {
         Uuid::now_v7().to_string().replace('-', "")
     }
@@ -29,11 +29,17 @@ impl ImageDendrite {
         let uid = Self::unique_id();
         let normalized_key = data.trim().to_ascii_lowercase();
 
+        let modality = data
+            .split(':')
+            .next()
+            .unwrap_or("generic")
+            .to_ascii_lowercase();
+
         Self {
             uid,
             connections: Vec::new(),
             data: data.to_string(),
-            feature_type: "image_feature".to_string(),
+            modality,
             metadata: metadata.clone(),
             dendrite_type,
             normalized_key,
@@ -61,7 +67,7 @@ impl ImageDendrite {
     }
 }
 
-impl NetworkNode for ImageDendrite {
+impl NetworkNode for MultimodalDendrite {
     fn new_node(data: &str, metadata: &NodeMetadata, dendrite_type: DendriteType) -> Self {
         Self::new(data, metadata, dendrite_type)
     }

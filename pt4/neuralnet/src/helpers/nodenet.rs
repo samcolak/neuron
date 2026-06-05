@@ -1,5 +1,5 @@
 use crate::helpers::axon::Axon;
-use crate::helpers::text_dendrite::DendriteType;
+use crate::dendrites::text_dendrite::DendriteType;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -37,7 +37,7 @@ impl NodeMetadata {
 }
 
 pub trait NetworkNode {
-    
+
     fn new_node(data: &str, metadata: &NodeMetadata, dendrite_type: DendriteType) -> Self
     where
         Self: Sized;

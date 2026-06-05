@@ -12,7 +12,8 @@ use neuralnet::helpers::brain::MultiModalNeuralNetwork;
 use neuralnet::helpers::brain::QuestionStoreDecision;
 use neuralnet::helpers::multimodal_controller::MultiModalInput;
 use neuralnet::helpers::nodenet::NodeMetadata;
-use neuralnet::helpers::text_dendrite::DendriteType;
+
+use neuralnet::dendrites::text_dendrite::DendriteType;
 
 #[derive(Debug)]
 struct ModelCheck {
