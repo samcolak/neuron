@@ -1,8 +1,9 @@
 
-use crate::helpers::image_io::{ImageIoError, load_png_or_jpeg_from_path};
-use crate::helpers::multimodal_controller::{MultiModalController, MultiModalInput};
 use crate::core::neuralnet::NeuralNetwork;
 use crate::core::nodenet::{NetworkNode, NodeMetadata, NodeNetwork};
+
+use crate::helpers::image_io::{ImageIoError, load_png_or_jpeg_from_path};
+use crate::helpers::multimodal_controller::{MultiModalController, MultiModalInput};
 
 use crate::dendrites::multimodal_dendrite::MultimodalDendrite;
 use crate::dendrites::text_dendrite::DendriteType;

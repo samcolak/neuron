@@ -4,10 +4,10 @@ use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 
+use crate::core::nodenet::{NodeMetadata, NodeNetwork};
 use crate::helpers::image_io::{ImageIoError, load_png_or_jpeg_from_path};
 use crate::helpers::multimodal_controller::MultiModalInput;
 use crate::helpers::multimodal_neuralnet::MultiModalSubNetwork;
-use crate::core::nodenet::{NodeMetadata, NodeNetwork};
 use crate::dendrites::text_dendrite::DendriteType;
 use crate::dendrites::multimodal_dendrite::MultimodalDendrite;
 

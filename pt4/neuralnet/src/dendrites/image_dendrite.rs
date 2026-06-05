@@ -1,10 +1,10 @@
+
 use crate::helpers::axon::Axon;
 use crate::core::nodenet::{NetworkNode, NodeMetadata};
 use crate::dendrites::text_dendrite::DendriteType;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageDendrite {
@@ -21,9 +21,6 @@ pub struct ImageDendrite {
 }
 
 impl ImageDendrite {
-    fn unique_id() -> String {
-        Uuid::now_v7().to_string().replace('-', "")
-    }
 
     pub fn new(data: &str, metadata: &NodeMetadata, dendrite_type: DendriteType) -> Self {
         let uid = Self::unique_id();
@@ -59,9 +56,11 @@ impl ImageDendrite {
         let inserted_index = self.connections.len() - 1;
         self.connection_index.insert(other, inserted_index);
     }
+
 }
 
 impl NetworkNode for ImageDendrite {
+
     fn new_node(data: &str, metadata: &NodeMetadata, dendrite_type: DendriteType) -> Self {
         Self::new(data, metadata, dendrite_type)
     }
@@ -100,4 +99,5 @@ impl NetworkNode for ImageDendrite {
             self.connection_index.insert(connection.to.clone(), idx);
         }
     }
+
 }

@@ -8,9 +8,13 @@
 #![allow(clippy::absolute_paths, reason = "")]
 #![allow(clippy::clone_on_ref_ptr, reason = "")]
 
-use neuralnet::core::brain::MultiModalNeuralNetwork;
-use neuralnet::core::brain::QuestionStoreDecision;
-use neuralnet::core::nodenet::NodeMetadata;
+use neuralnet::core::{
+    brain::{
+        MultiModalNeuralNetwork,
+        QuestionStoreDecision,
+    },
+    nodenet::NodeMetadata
+};
 
 use neuralnet::helpers::multimodal_controller::MultiModalInput;
 

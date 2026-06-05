@@ -1,3 +1,4 @@
+
 use serde::{Deserialize, Serialize};
 
 // Axon represents the sending end of a connection in a neural network. It connects one Dendrite to another and has a weight associated with it.

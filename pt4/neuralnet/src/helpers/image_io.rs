@@ -1,3 +1,4 @@
+
 use image::{self, ImageFormat};
 
 use std::fmt;

@@ -4,6 +4,9 @@ use crate::dendrites::text_dendrite::DendriteType;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use uuid::Uuid;
+
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NodeMetadata {
     pub attributes: HashMap<String, String>,
@@ -37,6 +40,10 @@ impl NodeMetadata {
 }
 
 pub trait NetworkNode {
+
+    fn unique_id() -> String {
+        Uuid::now_v7().to_string().replace('-', "")
+    }
 
     fn new_node(data: &str, metadata: &NodeMetadata, dendrite_type: DendriteType) -> Self
     where

@@ -1,7 +1,6 @@
+
 use crate::helpers::axon::Axon;
 use crate::core::nodenet::{NetworkNode, NodeMetadata};
-
-use uuid::Uuid;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -68,9 +67,6 @@ pub struct TextDendrite {
 }
 
 impl TextDendrite {
-    pub fn unique_id() -> String {
-        Uuid::now_v7().to_string().replace("-", "")
-    }
 
     pub fn new(data: &str, metadata: &NodeMetadata, dendrite_type: DendriteType) -> Self {
         let uid = Self::unique_id();
@@ -109,6 +105,7 @@ impl TextDendrite {
 }
 
 impl NetworkNode for TextDendrite {
+
     fn new_node(data: &str, metadata: &NodeMetadata, dendrite_type: DendriteType) -> Self {
         Self::new(data, metadata, dendrite_type)
     }
@@ -147,4 +144,5 @@ impl NetworkNode for TextDendrite {
             self.connection_index.insert(connection.to.clone(), idx);
         }
     }
+
 }
