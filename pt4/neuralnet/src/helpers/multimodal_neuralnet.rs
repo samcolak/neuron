@@ -85,7 +85,7 @@ where
         }
 
         (None, Vec::new())
-        
+
     }
 
     fn insert_content(
@@ -104,6 +104,7 @@ where
         let mut chosen_path = Vec::new();
 
         for token in tokens {
+
             let token_key = self.token_key_for_index(&token);
             if token_key.is_empty() {
                 continue;
@@ -116,15 +117,18 @@ where
                 .unwrap_or_else(|| self.insert_dendrite_and_index(&token, metadata, dendrite_type));
 
             chosen_path.push(uid);
+
         }
 
         for pair in chosen_path.windows(2) {
             self.connect_dendrites(&pair[0], &pair[1], 1);
         }
+
     }
 }
 
 impl NeuralNetwork<MultiModalController, MultimodalDendrite> {
+    
     pub fn new_multimodal() -> Self {
         Self::with_controller(MultiModalController)
     }
