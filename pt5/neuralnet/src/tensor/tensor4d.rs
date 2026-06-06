@@ -1,0 +1,415 @@
+use std::error::Error;
+use std::fmt::{Display, Formatter};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TensorError {
+    ShapeMismatch {
+        expected: usize,
+        actual: usize,
+    },
+    IncompatibleShapes {
+        left: (usize, usize, usize, usize),
+        right: (usize, usize, usize, usize),
+    },
+    OutOfBounds {
+        n: usize,
+        c: usize,
+        h: usize,
+        w: usize,
+    },
+    InvalidArgument(&'static str),
+}
+
+impl Display for TensorError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ShapeMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "tensor shape mismatch: expected {} elements, got {}",
+                    expected, actual
+                )
+            }
+            Self::IncompatibleShapes { left, right } => {
+                write!(
+                    f,
+                    "incompatible tensor shapes: left={:?}, right={:?}",
+                    left, right
+                )
+            }
+            Self::OutOfBounds { n, c, h, w } => {
+                write!(
+                    f,
+                    "tensor index out of bounds at n={}, c={}, h={}, w={}",
+                    n, c, h, w
+                )
+            }
+            Self::InvalidArgument(message) => write!(f, "invalid tensor argument: {}", message),
+        }
+    }
+}
+
+impl Error for TensorError {}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tensor4D {
+    data: Vec<f32>,
+    n: usize,
+    c: usize,
+    h: usize,
+    w: usize,
+}
+
+impl Tensor4D {
+    pub fn new(n: usize, c: usize, h: usize, w: usize, value: f32) -> Self {
+        let len = n.saturating_mul(c).saturating_mul(h).saturating_mul(w);
+        Self {
+            data: vec![value; len],
+            n,
+            c,
+            h,
+            w,
+        }
+    }
+
+    pub fn zeros(n: usize, c: usize, h: usize, w: usize) -> Self {
+        Self::new(n, c, h, w, 0.0)
+    }
+
+    pub fn from_vec(
+        n: usize,
+        c: usize,
+        h: usize,
+        w: usize,
+        data: Vec<f32>,
+    ) -> Result<Self, TensorError> {
+        let expected = n
+            .checked_mul(c)
+            .and_then(|x| x.checked_mul(h))
+            .and_then(|x| x.checked_mul(w))
+            .unwrap_or(usize::MAX);
+
+        if data.len() != expected {
+            return Err(TensorError::ShapeMismatch {
+                expected,
+                actual: data.len(),
+            });
+        }
+
+        Ok(Self { data, n, c, h, w })
+    }
+
+    pub fn shape(&self) -> (usize, usize, usize, usize) {
+        (self.n, self.c, self.h, self.w)
+    }
+
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    pub fn as_slice(&self) -> &[f32] {
+        self.data.as_slice()
+    }
+
+    pub fn as_mut_slice(&mut self) -> &mut [f32] {
+        self.data.as_mut_slice()
+    }
+
+    pub fn get(&self, n: usize, c: usize, h: usize, w: usize) -> Result<f32, TensorError> {
+        let idx = self.offset(n, c, h, w)?;
+        Ok(self.data[idx])
+    }
+
+    pub fn set(
+        &mut self,
+        n: usize,
+        c: usize,
+        h: usize,
+        w: usize,
+        value: f32,
+    ) -> Result<(), TensorError> {
+        let idx = self.offset(n, c, h, w)?;
+        self.data[idx] = value;
+        Ok(())
+    }
+
+    pub fn fill(&mut self, value: f32) {
+        self.data.fill(value);
+    }
+
+    pub fn map_inplace<F>(&mut self, mut f: F)
+    where
+        F: FnMut(f32) -> f32,
+    {
+        for item in &mut self.data {
+            *item = f(*item);
+        }
+    }
+
+    pub fn add_inplace(&mut self, other: &Self) -> Result<(), TensorError> {
+        if self.shape() != other.shape() {
+            return Err(TensorError::IncompatibleShapes {
+                left: self.shape(),
+                right: other.shape(),
+            });
+        }
+
+        for (left, right) in self.data.iter_mut().zip(other.data.iter()) {
+            *left += *right;
+        }
+
+        Ok(())
+    }
+
+    pub fn conv2d_valid(
+        &self,
+        kernels: &Self,
+        bias: Option<&[f32]>,
+        stride_h: usize,
+        stride_w: usize,
+    ) -> Result<Self, TensorError> {
+        if stride_h == 0 || stride_w == 0 {
+            return Err(TensorError::InvalidArgument("stride must be greater than zero"));
+        }
+
+        if self.c != kernels.c {
+            return Err(TensorError::IncompatibleShapes {
+                left: self.shape(),
+                right: kernels.shape(),
+            });
+        }
+
+        if kernels.n == 0 || kernels.h == 0 || kernels.w == 0 {
+            return Err(TensorError::InvalidArgument(
+                "kernel shape must have non-zero output channels and spatial size",
+            ));
+        }
+
+        if self.h < kernels.h || self.w < kernels.w {
+            return Err(TensorError::InvalidArgument(
+                "kernel spatial size cannot exceed input spatial size",
+            ));
+        }
+
+        if let Some(bias_values) = bias {
+            if bias_values.len() != kernels.n {
+                return Err(TensorError::ShapeMismatch {
+                    expected: kernels.n,
+                    actual: bias_values.len(),
+                });
+            }
+        }
+
+        let out_h = ((self.h - kernels.h) / stride_h) + 1;
+        let out_w = ((self.w - kernels.w) / stride_w) + 1;
+        let mut output = Tensor4D::zeros(self.n, kernels.n, out_h, out_w);
+
+        for batch in 0..self.n {
+            for out_c in 0..kernels.n {
+                let bias_value = bias.and_then(|b| b.get(out_c)).copied().unwrap_or(0.0);
+                for out_y in 0..out_h {
+                    let in_y = out_y * stride_h;
+                    for out_x in 0..out_w {
+                        let in_x = out_x * stride_w;
+                        let mut acc = bias_value;
+                        for in_c in 0..self.c {
+                            for ky in 0..kernels.h {
+                                for kx in 0..kernels.w {
+                                    let input_value = self.get(batch, in_c, in_y + ky, in_x + kx)?;
+                                    let kernel_value = kernels.get(out_c, in_c, ky, kx)?;
+                                    acc += input_value * kernel_value;
+                                }
+                            }
+                        }
+                        output.set(batch, out_c, out_y, out_x, acc)?;
+                    }
+                }
+            }
+        }
+
+        Ok(output)
+    }
+
+    pub fn max_pool2d(
+        &self,
+        window_h: usize,
+        window_w: usize,
+        stride_h: usize,
+        stride_w: usize,
+    ) -> Result<Self, TensorError> {
+        if window_h == 0 || window_w == 0 {
+            return Err(TensorError::InvalidArgument(
+                "pooling window must be greater than zero",
+            ));
+        }
+        if stride_h == 0 || stride_w == 0 {
+            return Err(TensorError::InvalidArgument("stride must be greater than zero"));
+        }
+        if self.h < window_h || self.w < window_w {
+            return Err(TensorError::InvalidArgument(
+                "pooling window cannot exceed input spatial size",
+            ));
+        }
+
+        let out_h = ((self.h - window_h) / stride_h) + 1;
+        let out_w = ((self.w - window_w) / stride_w) + 1;
+        let mut output = Tensor4D::zeros(self.n, self.c, out_h, out_w);
+
+        for batch in 0..self.n {
+            for channel in 0..self.c {
+                for out_y in 0..out_h {
+                    let in_y = out_y * stride_h;
+                    for out_x in 0..out_w {
+                        let in_x = out_x * stride_w;
+                        let mut max_value = f32::NEG_INFINITY;
+                        for wy in 0..window_h {
+                            for wx in 0..window_w {
+                                let value = self.get(batch, channel, in_y + wy, in_x + wx)?;
+                                if value > max_value {
+                                    max_value = value;
+                                }
+                            }
+                        }
+                        output.set(batch, channel, out_y, out_x, max_value)?;
+                    }
+                }
+            }
+        }
+
+        Ok(output)
+    }
+
+    fn offset(&self, n: usize, c: usize, h: usize, w: usize) -> Result<usize, TensorError> {
+        if n >= self.n || c >= self.c || h >= self.h || w >= self.w {
+            return Err(TensorError::OutOfBounds { n, c, h, w });
+        }
+
+        Ok((((n * self.c) + c) * self.h + h) * self.w + w)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tensor4d_round_trip_get_set() {
+        let mut tensor = Tensor4D::zeros(2, 1, 2, 2);
+
+        assert!(tensor.set(1, 0, 1, 1, 3.5).is_ok());
+        assert_eq!(tensor.get(1, 0, 1, 1), Ok(3.5));
+    }
+
+    #[test]
+    fn tensor4d_from_vec_validates_shape() {
+        let result = Tensor4D::from_vec(1, 1, 2, 2, vec![0.0, 1.0, 2.0]);
+        assert!(matches!(
+            result,
+            Err(TensorError::ShapeMismatch {
+                expected: 4,
+                actual: 3
+            })
+        ));
+    }
+
+    #[test]
+    fn tensor4d_add_inplace_requires_same_shape() {
+        let mut left = Tensor4D::zeros(1, 1, 2, 2);
+        let right = Tensor4D::zeros(1, 2, 2, 2);
+
+        let result = left.add_inplace(&right);
+        assert!(matches!(result, Err(TensorError::IncompatibleShapes { .. })));
+    }
+
+    #[test]
+    fn tensor4d_map_and_add_work() {
+        let mut left = Tensor4D::from_vec(1, 1, 2, 2, vec![1.0, 2.0, 3.0, 4.0])
+            .unwrap_or_else(|_| panic!("left tensor should be valid"));
+        let right = Tensor4D::from_vec(1, 1, 2, 2, vec![0.5, 0.5, 0.5, 0.5])
+            .unwrap_or_else(|_| panic!("right tensor should be valid"));
+
+        left.map_inplace(|x| x * 2.0);
+        assert!(left.add_inplace(&right).is_ok());
+
+        assert_eq!(left.as_slice(), &[2.5, 4.5, 6.5, 8.5]);
+    }
+
+    #[test]
+    fn tensor4d_conv2d_valid_applies_kernel_and_bias() {
+        let input = Tensor4D::from_vec(
+            1,
+            1,
+            3,
+            3,
+            vec![
+                1.0, 2.0, 3.0, // row 0
+                4.0, 5.0, 6.0, // row 1
+                7.0, 8.0, 9.0, // row 2
+            ],
+        )
+        .unwrap_or_else(|_| panic!("input tensor should be valid"));
+
+        let kernels = Tensor4D::from_vec(1, 1, 2, 2, vec![1.0, 0.0, 0.0, 1.0])
+            .unwrap_or_else(|_| panic!("kernel tensor should be valid"));
+
+        let output = input
+            .conv2d_valid(&kernels, Some(&[1.0]), 1, 1)
+            .unwrap_or_else(|_| panic!("convolution should succeed"));
+
+        assert_eq!(output.shape(), (1, 1, 2, 2));
+        assert_eq!(output.as_slice(), &[7.0, 9.0, 13.0, 15.0]);
+    }
+
+    #[test]
+    fn tensor4d_conv2d_valid_rejects_zero_stride() {
+        let input = Tensor4D::zeros(1, 1, 3, 3);
+        let kernels = Tensor4D::zeros(1, 1, 2, 2);
+
+        let result = input.conv2d_valid(&kernels, None, 0, 1);
+        assert!(matches!(
+            result,
+            Err(TensorError::InvalidArgument("stride must be greater than zero"))
+        ));
+    }
+
+    #[test]
+    fn tensor4d_max_pool2d_computes_window_maxima() {
+        let input = Tensor4D::from_vec(
+            1,
+            1,
+            4,
+            4,
+            vec![
+                1.0, 3.0, 2.0, 0.0, // row 0
+                5.0, 6.0, 1.0, 4.0, // row 1
+                2.0, 8.0, 7.0, 3.0, // row 2
+                9.0, 1.0, 5.0, 2.0, // row 3
+            ],
+        )
+        .unwrap_or_else(|_| panic!("input tensor should be valid"));
+
+        let output = input
+            .max_pool2d(2, 2, 2, 2)
+            .unwrap_or_else(|_| panic!("max pooling should succeed"));
+
+        assert_eq!(output.shape(), (1, 1, 2, 2));
+        assert_eq!(output.as_slice(), &[6.0, 4.0, 9.0, 7.0]);
+    }
+
+    #[test]
+    fn tensor4d_max_pool2d_rejects_invalid_window() {
+        let input = Tensor4D::zeros(1, 1, 2, 2);
+
+        let result = input.max_pool2d(0, 2, 1, 1);
+        assert!(matches!(
+            result,
+            Err(TensorError::InvalidArgument(
+                "pooling window must be greater than zero"
+            ))
+        ));
+    }
+}
