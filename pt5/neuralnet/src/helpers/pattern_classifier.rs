@@ -22,6 +22,7 @@ pub struct PatternClassifier {
 }
 
 impl PatternClassifier {
+    
     pub fn new() -> Self {
         Self {
             patterns: Vec::new(),
@@ -56,6 +57,7 @@ impl PatternClassifier {
     }
 
     pub fn train_example(&mut self, label: &str, content: MultiModalInput) {
+
         let normalized_label = label.trim().to_ascii_lowercase();
 
         if normalized_label.is_empty() {
@@ -75,6 +77,7 @@ impl PatternClassifier {
             label: normalized_label,
             content,
         });
+
     }
 
     pub fn train_text(&mut self, label: &str, text: &str) {
@@ -96,6 +99,7 @@ impl PatternClassifier {
     }
 
     pub fn classify(&self, input: &MultiModalInput) -> Option<ClassificationResult> {
+
         let mut best: Option<ClassificationResult> = None;
 
         for pattern in &self.patterns {
@@ -117,6 +121,7 @@ impl PatternClassifier {
             Some(result) if result.score >= self.min_confidence => Some(result),
             _ => None,
         }
+
     }
 
     pub fn classify_top_k(&self, input: &MultiModalInput, k: usize) -> Vec<ClassificationResult> {
@@ -141,6 +146,7 @@ impl PatternClassifier {
 }
 
 fn score_inputs(left: &MultiModalInput, right: &MultiModalInput) -> f64 {
+
     let controller = MultiModalController;
 
     let left_tokens: Vec<String> = controller
@@ -165,6 +171,7 @@ fn score_inputs(left: &MultiModalInput, right: &MultiModalInput) -> f64 {
     let right_to_left = directional_score(&controller, &right_tokens, &left_tokens);
 
     ((left_to_right + right_to_left) / 2.0).clamp(0.0, 1.0)
+
 }
 
 fn directional_score(
@@ -172,6 +179,7 @@ fn directional_score(
     source_tokens: &[String],
     target_tokens: &[String],
 ) -> f64 {
+
     if source_tokens.is_empty() || target_tokens.is_empty() {
         return 0.0;
     }
@@ -192,6 +200,7 @@ fn directional_score(
     }
 
     token_scores.iter().copied().sum::<f64>() / token_scores.len() as f64
+
 }
 
 #[cfg(test)]
