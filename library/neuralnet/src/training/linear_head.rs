@@ -86,6 +86,22 @@ pub struct LinearHead {
     weight_optimizer_state: OptimizerState,
     #[serde(default)]
     bias_optimizer_state: OptimizerState,
+    // Scratch buffers reused across train calls — excluded from serialisation.
+    // All sizes are fixed by input_dim / output_dim for the lifetime of the head.
+    #[serde(skip)]
+    scratch_logits: Vec<f32>,
+    #[serde(skip)]
+    scratch_probs: Vec<f32>,
+    #[serde(skip)]
+    scratch_weight_grad: Vec<f32>,
+    #[serde(skip)]
+    scratch_bias_grad: Vec<f32>,
+    #[serde(skip)]
+    scratch_input_grad: Vec<f32>,
+    #[serde(skip)]
+    scratch_scaled_weight_grad: Vec<f32>,
+    #[serde(skip)]
+    scratch_scaled_bias_grad: Vec<f32>,
 }
 
 impl LinearHead {
@@ -112,6 +128,7 @@ impl LinearHead {
             }
         }
 
+        let weight_len = output_dim * input_dim;
         Ok(Self {
             input_dim,
             output_dim,
@@ -122,6 +139,13 @@ impl LinearHead {
             weight_decay: 0.0,
             weight_optimizer_state: OptimizerState::from_kind(LinearOptimizer::Sgd),
             bias_optimizer_state: OptimizerState::from_kind(LinearOptimizer::Sgd),
+            scratch_logits: vec![0.0f32; output_dim],
+            scratch_probs: vec![0.0f32; output_dim],
+            scratch_weight_grad: vec![0.0f32; weight_len],
+            scratch_bias_grad: vec![0.0f32; output_dim],
+            scratch_input_grad: vec![0.0f32; input_dim],
+            scratch_scaled_weight_grad: vec![0.0f32; weight_len],
+            scratch_scaled_bias_grad: vec![0.0f32; output_dim],
         })
     }
 
@@ -156,21 +180,22 @@ impl LinearHead {
     }
 
     pub fn logits(&self, features: &[f32]) -> Result<Vec<f32>, LinearHeadError> {
-
         validate_features(features, self.input_dim)?;
-
         let mut logits = vec![0.0f32; self.output_dim];
+        Self::compute_logits_into(&self.weights, &self.bias, self.input_dim, features, &mut logits);
+        Ok(logits)
+    }
+
+    fn compute_logits_into(weights: &[f32], bias: &[f32], input_dim: usize, features: &[f32], logits: &mut Vec<f32>) {
+        logits.resize(bias.len(), 0.0);
         for (out, out_logit) in logits.iter_mut().enumerate() {
-            let mut value = self.bias[out];
-            let row_offset = out * self.input_dim;
+            let mut value = bias[out];
+            let row_offset = out * input_dim;
             for (in_idx, feature) in features.iter().enumerate() {
-                value += self.weights[row_offset + in_idx] * *feature;
+                value += weights[row_offset + in_idx] * *feature;
             }
             *out_logit = value;
         }
-
-        Ok(logits)
-
     }
 
     pub fn probabilities(&self, features: &[f32]) -> Result<Vec<f32>, LinearHeadError> {
@@ -211,38 +236,37 @@ impl LinearHead {
     ) -> Result<(f32, Vec<f32>), LinearHeadError> {
         validate_features(features, self.input_dim)?;
         validate_target(target_class, self.output_dim)?;
+        self.ensure_scratch_initialized();
+        Self::compute_logits_into(&self.weights, &self.bias, self.input_dim, features, &mut self.scratch_logits);
+        softmax_into(&self.scratch_logits.clone(), &mut self.scratch_probs);
 
-        let logits = self.logits(features)?;
-        let mut probs = softmax(&logits);
-
-        let target_prob = probs[target_class].max(1e-9);
+        let target_prob = self.scratch_probs[target_class].max(1e-9);
         let loss = -target_prob.ln();
 
-        probs[target_class] -= 1.0;
+        self.scratch_probs[target_class] -= 1.0;
 
-        let mut input_grad = vec![0.0f32; self.input_dim];
-        for (in_idx, grad) in input_grad.iter_mut().enumerate() {
+        self.scratch_input_grad.fill(0.0);
+        for (in_idx, grad) in self.scratch_input_grad.iter_mut().enumerate() {
             let mut accum = 0.0f32;
-            for (out, delta) in probs.iter().enumerate() {
+            for (out, delta) in self.scratch_probs.iter().enumerate() {
                 accum += *delta * self.weights[out * self.input_dim + in_idx];
             }
             *grad = accum;
         }
 
-        let mut weight_grad = vec![0.0f32; self.weights.len()];
-        let mut bias_grad = vec![0.0f32; self.bias.len()];
-        for (out, delta) in probs.iter().enumerate() {
+        self.scratch_weight_grad.fill(0.0);
+        self.scratch_bias_grad.fill(0.0);
+        for (out, delta) in self.scratch_probs.iter().enumerate() {
             let row_offset = out * self.input_dim;
             for (in_idx, feature) in features.iter().enumerate() {
-                let grad = *delta * *feature;
-                weight_grad[row_offset + in_idx] += grad;
+                self.scratch_weight_grad[row_offset + in_idx] += *delta * *feature;
             }
-            bias_grad[out] += *delta;
+            self.scratch_bias_grad[out] += *delta;
         }
 
-        self.apply_gradients(weight_grad.as_slice(), bias_grad.as_slice(), 1.0);
+        self.apply_gradients_from_scratch(1.0);
 
-        Ok((loss, input_grad))
+        Ok((loss, self.scratch_input_grad.clone()))
     }
 
     pub fn train_batch(
@@ -277,40 +301,41 @@ impl LinearHead {
 
         let batch_size = feature_batch.len() as f32;
         let mut total_loss = 0.0f32;
-        let mut weight_grad = vec![0.0f32; self.weights.len()];
-        let mut bias_grad = vec![0.0f32; self.output_dim];
+        self.ensure_scratch_initialized();
+        self.scratch_weight_grad.fill(0.0);
+        self.scratch_bias_grad.fill(0.0);
         let mut input_grads: Vec<Vec<f32>> = Vec::with_capacity(feature_batch.len());
 
         for (features, target) in feature_batch.iter().zip(target_classes.iter()) {
-            let logits = self.logits(features.as_slice())?;
-            let mut probs = softmax(&logits);
+            Self::compute_logits_into(&self.weights, &self.bias, self.input_dim, features.as_slice(), &mut self.scratch_logits);
+            softmax_into(&self.scratch_logits.clone(), &mut self.scratch_probs);
 
-            let target_prob = probs[*target].max(1e-9);
+            let target_prob = self.scratch_probs[*target].max(1e-9);
             total_loss += -target_prob.ln();
 
-            probs[*target] -= 1.0;
+            self.scratch_probs[*target] -= 1.0;
 
-            let mut input_grad = vec![0.0f32; self.input_dim];
-            for (in_idx, grad) in input_grad.iter_mut().enumerate() {
+            self.scratch_input_grad.fill(0.0);
+            for (in_idx, grad) in self.scratch_input_grad.iter_mut().enumerate() {
                 let mut accum = 0.0f32;
-                for (out, delta) in probs.iter().enumerate() {
+                for (out, delta) in self.scratch_probs.iter().enumerate() {
                     accum += *delta * self.weights[out * self.input_dim + in_idx];
                 }
                 *grad = accum;
             }
-            input_grads.push(input_grad);
+            input_grads.push(self.scratch_input_grad.clone());
 
-            for (out, delta) in probs.iter().enumerate() {
+            for (out, delta) in self.scratch_probs.iter().enumerate() {
                 let row_offset = out * self.input_dim;
                 for (in_idx, feature) in features.iter().enumerate() {
-                    weight_grad[row_offset + in_idx] += *delta * *feature;
+                    self.scratch_weight_grad[row_offset + in_idx] += *delta * *feature;
                 }
-                bias_grad[out] += *delta;
+                self.scratch_bias_grad[out] += *delta;
             }
         }
 
         let scale = 1.0 / batch_size;
-        self.apply_gradients(weight_grad.as_slice(), bias_grad.as_slice(), scale);
+        self.apply_gradients_from_scratch(scale);
 
         Ok((total_loss * scale, input_grads))
     }
@@ -324,30 +349,84 @@ impl LinearHead {
         }
     }
 
+    /// Ensures scratch buffers are the correct size after deserialisation,
+    /// where serde(skip) leaves them as empty Vecs.
+    fn ensure_scratch_initialized(&mut self) {
+        let weight_len = self.output_dim * self.input_dim;
+        if self.scratch_logits.len() != self.output_dim {
+            self.scratch_logits.resize(self.output_dim, 0.0);
+        }
+        if self.scratch_probs.len() != self.output_dim {
+            self.scratch_probs.resize(self.output_dim, 0.0);
+        }
+        if self.scratch_weight_grad.len() != weight_len {
+            self.scratch_weight_grad.resize(weight_len, 0.0);
+        }
+        if self.scratch_bias_grad.len() != self.output_dim {
+            self.scratch_bias_grad.resize(self.output_dim, 0.0);
+        }
+        if self.scratch_input_grad.len() != self.input_dim {
+            self.scratch_input_grad.resize(self.input_dim, 0.0);
+        }
+        if self.scratch_scaled_weight_grad.len() != weight_len {
+            self.scratch_scaled_weight_grad.resize(weight_len, 0.0);
+        }
+        if self.scratch_scaled_bias_grad.len() != self.output_dim {
+            self.scratch_scaled_bias_grad.resize(self.output_dim, 0.0);
+        }
+    }
+
     fn apply_gradients(&mut self, weight_grad: &[f32], bias_grad: &[f32], scale: f32) {
         self.synchronize_optimizer_state();
 
-        let mut scaled_weight_grad = vec![0.0f32; weight_grad.len()];
-        let mut scaled_bias_grad = vec![0.0f32; bias_grad.len()];
+        self.scratch_scaled_weight_grad.resize(weight_grad.len(), 0.0);
+        self.scratch_scaled_bias_grad.resize(bias_grad.len(), 0.0);
 
-        for (dst, src) in scaled_weight_grad.iter_mut().zip(weight_grad.iter()) {
+        for (dst, src) in self.scratch_scaled_weight_grad.iter_mut().zip(weight_grad.iter()) {
             *dst = *src * scale;
         }
-
-        for (dst, src) in scaled_bias_grad.iter_mut().zip(bias_grad.iter()) {
+        for (dst, src) in self.scratch_scaled_bias_grad.iter_mut().zip(bias_grad.iter()) {
             *dst = *src * scale;
         }
 
         self.weight_optimizer_state.apply(
             self.weights.as_mut_slice(),
-            scaled_weight_grad.as_slice(),
+            self.scratch_scaled_weight_grad.as_slice(),
             self.learning_rate,
             self.weight_decay,
         );
-
         self.bias_optimizer_state.apply(
             self.bias.as_mut_slice(),
-            scaled_bias_grad.as_slice(),
+            self.scratch_scaled_bias_grad.as_slice(),
+            self.learning_rate,
+            0.0,
+        );
+    }
+
+    /// Variant used by train_step/train_batch — reads directly from scratch_weight_grad
+    /// and scratch_bias_grad, avoiding a redundant borrow of self.
+    fn apply_gradients_from_scratch(&mut self, scale: f32) {
+        self.synchronize_optimizer_state();
+
+        self.scratch_scaled_weight_grad.resize(self.scratch_weight_grad.len(), 0.0);
+        self.scratch_scaled_bias_grad.resize(self.scratch_bias_grad.len(), 0.0);
+
+        for (dst, src) in self.scratch_scaled_weight_grad.iter_mut().zip(self.scratch_weight_grad.iter()) {
+            *dst = *src * scale;
+        }
+        for (dst, src) in self.scratch_scaled_bias_grad.iter_mut().zip(self.scratch_bias_grad.iter()) {
+            *dst = *src * scale;
+        }
+
+        self.weight_optimizer_state.apply(
+            self.weights.as_mut_slice(),
+            self.scratch_scaled_weight_grad.as_slice(),
+            self.learning_rate,
+            self.weight_decay,
+        );
+        self.bias_optimizer_state.apply(
+            self.bias.as_mut_slice(),
+            self.scratch_scaled_bias_grad.as_slice(),
             self.learning_rate,
             0.0,
         );
@@ -395,6 +474,32 @@ fn softmax(logits: &[f32]) -> Vec<f32> {
     }
 
     exps.into_iter().map(|value| value / denom).collect()
+}
+
+/// In-place softmax — writes into an existing buffer to avoid allocation on hot paths.
+fn softmax_into(logits: &[f32], out: &mut Vec<f32>) {
+    out.resize(logits.len(), 0.0);
+
+    if logits.is_empty() {
+        return;
+    }
+
+    let max_logit = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+
+    let mut denom = 0.0f32;
+    for (dst, src) in out.iter_mut().zip(logits.iter()) {
+        *dst = (*src - max_logit).exp();
+        denom += *dst;
+    }
+
+    if denom <= 0.0 {
+        let uniform = 1.0 / logits.len() as f32;
+        out.fill(uniform);
+    } else {
+        for v in out.iter_mut() {
+            *v /= denom;
+        }
+    }
 }
 
 #[cfg(test)]

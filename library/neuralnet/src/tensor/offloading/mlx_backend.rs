@@ -1,13 +1,133 @@
-use crate::tensor::backend::TensorBackend;
+use crate::tensor::backend::{
+    cpu_conv_block_backward_gradients,
+    ConvBlockBackwardGradients,
+    TensorBackend,
+};
 use crate::tensor::tensor4d::{Tensor4D, TensorError};
 
 #[cfg(feature = "offloading-mlx")]
 use apple_mlx::raw;
 #[cfg(feature = "offloading-mlx")]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "offloading-mlx")]
 use std::sync::{Mutex, OnceLock};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MlxTensorBackend;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MlxBackpropPathSnapshot {
+    pub total_calls: u64,
+    pub full_native_success: u64,
+    pub full_cpu_fallback: u64,
+    pub input_grad_requested: u64,
+    pub input_grad_skipped: u64,
+    pub intended_native_dw: u64,
+    pub executed_native_dw: u64,
+    pub fallback_dw: u64,
+    pub intended_native_dinput: u64,
+    pub executed_native_dinput: u64,
+    pub fallback_dinput: u64,
+}
+
+impl MlxBackpropPathSnapshot {
+    pub fn full_native_success_ratio(&self) -> f64 {
+        if self.total_calls == 0 {
+            0.0
+        } else {
+            self.full_native_success as f64 / self.total_calls as f64
+        }
+    }
+
+    pub fn full_cpu_fallback_ratio(&self) -> f64 {
+        if self.total_calls == 0 {
+            0.0
+        } else {
+            self.full_cpu_fallback as f64 / self.total_calls as f64
+        }
+    }
+
+    pub fn dw_native_realization_ratio(&self) -> f64 {
+        if self.intended_native_dw == 0 {
+            0.0
+        } else {
+            self.executed_native_dw as f64 / self.intended_native_dw as f64
+        }
+    }
+
+    pub fn dinput_native_realization_ratio(&self) -> f64 {
+        if self.intended_native_dinput == 0 {
+            0.0
+        } else {
+            self.executed_native_dinput as f64 / self.intended_native_dinput as f64
+        }
+    }
+}
+
+#[cfg(feature = "offloading-mlx")]
+#[derive(Default)]
+struct MlxBackpropPathCounters {
+    total_calls: AtomicU64,
+    full_native_success: AtomicU64,
+    full_cpu_fallback: AtomicU64,
+    input_grad_requested: AtomicU64,
+    input_grad_skipped: AtomicU64,
+    intended_native_dw: AtomicU64,
+    executed_native_dw: AtomicU64,
+    fallback_dw: AtomicU64,
+    intended_native_dinput: AtomicU64,
+    executed_native_dinput: AtomicU64,
+    fallback_dinput: AtomicU64,
+}
+
+#[cfg(feature = "offloading-mlx")]
+fn mlx_backprop_path_counters() -> &'static MlxBackpropPathCounters {
+    static COUNTERS: OnceLock<MlxBackpropPathCounters> = OnceLock::new();
+    COUNTERS.get_or_init(MlxBackpropPathCounters::default)
+}
+
+pub fn mlx_backprop_path_snapshot() -> MlxBackpropPathSnapshot {
+    #[cfg(feature = "offloading-mlx")]
+    {
+        let counters = mlx_backprop_path_counters();
+        return MlxBackpropPathSnapshot {
+            total_calls: counters.total_calls.load(Ordering::Relaxed),
+            full_native_success: counters.full_native_success.load(Ordering::Relaxed),
+            full_cpu_fallback: counters.full_cpu_fallback.load(Ordering::Relaxed),
+            input_grad_requested: counters.input_grad_requested.load(Ordering::Relaxed),
+            input_grad_skipped: counters.input_grad_skipped.load(Ordering::Relaxed),
+            intended_native_dw: counters.intended_native_dw.load(Ordering::Relaxed),
+            executed_native_dw: counters.executed_native_dw.load(Ordering::Relaxed),
+            fallback_dw: counters.fallback_dw.load(Ordering::Relaxed),
+            intended_native_dinput: counters.intended_native_dinput.load(Ordering::Relaxed),
+            executed_native_dinput: counters.executed_native_dinput.load(Ordering::Relaxed),
+            fallback_dinput: counters.fallback_dinput.load(Ordering::Relaxed),
+        };
+    }
+
+    #[cfg(not(feature = "offloading-mlx"))]
+    {
+        MlxBackpropPathSnapshot::default()
+    }
+}
+
+pub fn mlx_backprop_path_reset() {
+    #[cfg(feature = "offloading-mlx")]
+    {
+        let counters = mlx_backprop_path_counters();
+        counters.total_calls.store(0, Ordering::Relaxed);
+        counters.full_native_success.store(0, Ordering::Relaxed);
+        counters.full_cpu_fallback.store(0, Ordering::Relaxed);
+        counters.input_grad_requested.store(0, Ordering::Relaxed);
+        counters.input_grad_skipped.store(0, Ordering::Relaxed);
+        counters.intended_native_dw.store(0, Ordering::Relaxed);
+        counters.executed_native_dw.store(0, Ordering::Relaxed);
+        counters.fallback_dw.store(0, Ordering::Relaxed);
+        counters.intended_native_dinput.store(0, Ordering::Relaxed);
+        counters.executed_native_dinput.store(0, Ordering::Relaxed);
+        counters.fallback_dinput.store(0, Ordering::Relaxed);
+    }
+}
 
 impl TensorBackend for MlxTensorBackend {
     fn name(&self) -> &'static str {
@@ -95,7 +215,564 @@ impl TensorBackend for MlxTensorBackend {
             pool_stride_w,
         )
     }
+
+    fn conv_block_backward_gradients(
+        &self,
+        kernels: &Tensor4D,
+        input: &Tensor4D,
+        conv_pre_activation: &Tensor4D,
+        pool_indices: &[(usize, usize)],
+        pooled_shape: (usize, usize, usize, usize),
+        pooled_grad: &Tensor4D,
+        compute_input_grad: bool,
+    ) -> Result<ConvBlockBackwardGradients, TensorError> {
+        mlx_conv_block_backward_gradients_fallback(
+            kernels,
+            input,
+            conv_pre_activation,
+            pool_indices,
+            pooled_shape,
+            pooled_grad,
+            compute_input_grad,
+        )
+    }
     
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mlx_conv_block_backward_gradients_fallback(
+    kernels: &Tensor4D,
+    input: &Tensor4D,
+    conv_pre_activation: &Tensor4D,
+    pool_indices: &[(usize, usize)],
+    pooled_shape: (usize, usize, usize, usize),
+    pooled_grad: &Tensor4D,
+    compute_input_grad: bool,
+) -> Result<ConvBlockBackwardGradients, TensorError> {
+    #[cfg(feature = "offloading-mlx")]
+    {
+        let counters = mlx_backprop_path_counters();
+        counters.total_calls.fetch_add(1, Ordering::Relaxed);
+
+        if let Ok(result) = mlx_conv_block_backward_gradients_native(
+            kernels,
+            input,
+            conv_pre_activation,
+            pool_indices,
+            pooled_shape,
+            pooled_grad,
+            compute_input_grad,
+        ) {
+            counters.full_native_success.fetch_add(1, Ordering::Relaxed);
+            return Ok(result);
+        }
+
+        counters.full_cpu_fallback.fetch_add(1, Ordering::Relaxed);
+    }
+
+    cpu_conv_block_backward_gradients(
+        kernels,
+        input,
+        conv_pre_activation,
+        pool_indices,
+        pooled_shape,
+        pooled_grad,
+        compute_input_grad,
+    )
+}
+
+#[cfg(feature = "offloading-mlx")]
+#[allow(clippy::too_many_arguments)]
+fn mlx_conv_block_backward_gradients_native(
+    kernels: &Tensor4D,
+    input: &Tensor4D,
+    conv_pre_activation: &Tensor4D,
+    pool_indices: &[(usize, usize)],
+    pooled_shape: (usize, usize, usize, usize),
+    pooled_grad: &Tensor4D,
+    compute_input_grad: bool,
+) -> Result<ConvBlockBackwardGradients, TensorError> {
+        let counters = mlx_backprop_path_counters();
+        if compute_input_grad {
+            counters.input_grad_requested.fetch_add(1, Ordering::Relaxed);
+        } else {
+            counters.input_grad_skipped.fetch_add(1, Ordering::Relaxed);
+        }
+
+    let pooled_grad_shape = pooled_grad.shape();
+    if pooled_grad_shape != pooled_shape {
+        return Err(TensorError::IncompatibleShapes {
+            left: pooled_shape,
+            right: pooled_grad_shape,
+        });
+    }
+
+    if pooled_shape.0 != 1 {
+        return Err(TensorError::InvalidArgument(
+            "mlx conv block backward currently supports batch size 1",
+        ));
+    }
+
+    let (_, channels, pooled_h, pooled_w) = pooled_shape;
+    let (_, _, relu_h, relu_w) = conv_pre_activation.shape();
+    let expected_pool_indices = channels
+        .checked_mul(pooled_h)
+        .and_then(|v| v.checked_mul(pooled_w))
+        .ok_or(TensorError::InvalidArgument("pool index shape overflow"))?;
+
+    if pool_indices.len() != expected_pool_indices {
+        return Err(TensorError::ShapeMismatch {
+            expected: expected_pool_indices,
+            actual: pool_indices.len(),
+        });
+    }
+
+    let _guard = mlx_runtime_lock()
+        .lock()
+        .map_err(|_| TensorError::InvalidArgument("mlx runtime lock poisoned"))?;
+
+    let stream = mlx_stream_new();
+    let pooled_plane = pooled_h * pooled_w;
+    let relu_plane = relu_h * relu_w;
+
+    let pooled_grad_shape_arr = [1, channels as i32, pooled_plane as i32];
+    let pooled_grad_arr = unsafe {
+        raw::mlx_array_new_data(
+            pooled_grad.as_slice().as_ptr().cast(),
+            pooled_grad_shape_arr.as_ptr(),
+            pooled_grad_shape_arr.len() as i32,
+            raw::mlx_dtype__MLX_FLOAT32,
+        )
+    };
+
+    let mut packed_indices = Vec::with_capacity(pool_indices.len());
+    for &(y, x) in pool_indices {
+        if y >= relu_h || x >= relu_w {
+            return Err(TensorError::InvalidArgument(
+                "pool indices exceed relu feature map bounds",
+            ));
+        }
+        packed_indices.push((y * relu_w + x) as i32);
+    }
+
+    let packed_indices_shape_arr = [1, channels as i32, pooled_plane as i32];
+    let packed_indices_arr = unsafe {
+        raw::mlx_array_new_data(
+            packed_indices.as_ptr().cast(),
+            packed_indices_shape_arr.as_ptr(),
+            packed_indices_shape_arr.len() as i32,
+            raw::mlx_dtype__MLX_INT32,
+        )
+    };
+
+    let conv_grad_flat_shape = [1, channels as i32, relu_plane as i32];
+    let mut conv_grad_flat = mlx_array_new();
+    unsafe {
+        mlx_check(
+            raw::mlx_zeros(
+                &mut conv_grad_flat,
+                conv_grad_flat_shape.as_ptr(),
+                conv_grad_flat_shape.len(),
+                raw::mlx_dtype__MLX_FLOAT32,
+                stream,
+            ),
+            "mlx_zeros conv_grad failed",
+        )?;
+    }
+
+    let mut conv_grad_scattered = mlx_array_new();
+    unsafe {
+        mlx_check(
+            raw::mlx_scatter_add_axis(
+                &mut conv_grad_scattered,
+                conv_grad_flat,
+                packed_indices_arr,
+                pooled_grad_arr,
+                2,
+                stream,
+            ),
+            "mlx_scatter_add_axis conv_grad failed",
+        )?;
+    }
+
+    let conv_grad = mlx_reshape(
+        conv_grad_scattered,
+        &[1, channels as i32, relu_h as i32, relu_w as i32],
+        stream,
+    )?;
+
+    let conv_pre_arr = mlx_array_from_tensor(conv_pre_activation);
+    let zero = unsafe { raw::mlx_array_new_float32(0.0) };
+    let mut relu_mask = mlx_array_new();
+    unsafe {
+        mlx_check(
+            raw::mlx_greater(&mut relu_mask, conv_pre_arr, zero, stream),
+            "mlx_greater relu mask failed",
+        )?;
+    }
+
+    let mut conv_grad_zeros = mlx_array_new();
+    unsafe {
+        mlx_check(
+            raw::mlx_zeros_like(&mut conv_grad_zeros, conv_grad, stream),
+            "mlx_zeros_like conv_grad failed",
+        )?;
+    }
+
+    let mut conv_grad_masked = mlx_array_new();
+    unsafe {
+        mlx_check(
+            raw::mlx_where(
+                &mut conv_grad_masked,
+                relu_mask,
+                conv_grad,
+                conv_grad_zeros,
+                stream,
+            ),
+            "mlx_where relu mask application failed",
+        )?;
+    }
+
+    let conv_grad_tensor = mlx_array_to_tensor(conv_grad_masked, stream)?;
+
+    let intended_native_dw = mlx_enable_experimental_native_dw();
+    if intended_native_dw {
+        counters.intended_native_dw.fetch_add(1, Ordering::Relaxed);
+    }
+
+    let native_kernel_grad = if intended_native_dw {
+        mlx_kernel_grad_native_from_conv_grad_array(conv_grad_masked, input, stream).ok()
+    } else {
+        None
+    };
+
+    if native_kernel_grad.is_some() {
+        counters.executed_native_dw.fetch_add(1, Ordering::Relaxed);
+    } else if intended_native_dw {
+        counters.fallback_dw.fetch_add(1, Ordering::Relaxed);
+    }
+
+    let intended_native_dinput = compute_input_grad && mlx_enable_experimental_native_dinput();
+    if intended_native_dinput {
+        counters
+            .intended_native_dinput
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    let native_input_grad = if intended_native_dinput {
+        mlx_input_grad_native_from_conv_grad_array(
+            conv_grad_masked,
+            kernels,
+            stream,
+        )
+        .ok()
+    } else {
+        None
+    };
+
+    if native_input_grad.is_some() {
+        counters
+            .executed_native_dinput
+            .fetch_add(1, Ordering::Relaxed);
+    } else if intended_native_dinput {
+        counters.fallback_dinput.fetch_add(1, Ordering::Relaxed);
+    }
+
+    let mut bias_arr = mlx_array_new();
+    let bias_axes = [2i32, 3i32];
+    unsafe {
+        mlx_check(
+            raw::mlx_sum_axes(
+                &mut bias_arr,
+                conv_grad_masked,
+                bias_axes.as_ptr(),
+                bias_axes.len(),
+                true,
+                stream,
+            ),
+            "mlx_sum_axes bias grad failed",
+        )?;
+    }
+
+    let bias_tensor = mlx_array_to_tensor(bias_arr, stream)?;
+    let bias_grad = bias_tensor.first_sample_features();
+
+    unsafe {
+        let _ = raw::mlx_array_free(pooled_grad_arr);
+        let _ = raw::mlx_array_free(packed_indices_arr);
+        let _ = raw::mlx_array_free(conv_grad_flat);
+        let _ = raw::mlx_array_free(conv_grad_scattered);
+        let _ = raw::mlx_array_free(conv_grad);
+        let _ = raw::mlx_array_free(conv_pre_arr);
+        let _ = raw::mlx_array_free(zero);
+        let _ = raw::mlx_array_free(relu_mask);
+        let _ = raw::mlx_array_free(conv_grad_zeros);
+        let _ = raw::mlx_array_free(conv_grad_masked);
+        let _ = raw::mlx_array_free(bias_arr);
+        let _ = raw::mlx_stream_free(stream);
+    }
+
+    let kernel_grad = if let Some(native) = native_kernel_grad {
+        native
+    } else {
+        cpu_kernel_grad_from_conv_grad(kernels, input, &conv_grad_tensor)?
+    };
+
+    let input_grad = if compute_input_grad {
+        if let Some(native) = native_input_grad {
+            Some(native)
+        } else {
+            Some(cpu_input_grad_from_conv_grad(kernels, &conv_grad_tensor)?)
+        }
+    } else {
+        None
+    };
+
+    Ok(ConvBlockBackwardGradients {
+        kernel_grad,
+        bias_grad,
+        input_grad,
+    })
+}
+
+#[cfg(feature = "offloading-mlx")]
+fn mlx_enable_experimental_native_dw() -> bool {
+    match std::env::var("NEURALNET_MLX_NATIVE_DW") {
+        Ok(value) => matches!(value.as_str(), "1" | "true" | "TRUE" | "on" | "ON"),
+        Err(_) => false,
+    }
+}
+
+#[cfg(feature = "offloading-mlx")]
+fn mlx_enable_experimental_native_dinput() -> bool {
+    match std::env::var("NEURALNET_MLX_NATIVE_DINPUT") {
+        Ok(value) => matches!(value.as_str(), "1" | "true" | "TRUE" | "on" | "ON"),
+        Err(_) => false,
+    }
+}
+
+#[cfg(feature = "offloading-mlx")]
+fn mlx_kernel_grad_native_from_conv_grad_array(
+    conv_grad_nchw: raw::mlx_array,
+    input: &Tensor4D,
+    stream: raw::mlx_stream,
+) -> Result<Tensor4D, TensorError> {
+    let (_, in_channels, in_h, in_w) = input.shape();
+    let (out_channels, conv_h, conv_w) = unsafe {
+        let ndim = raw::mlx_array_ndim(conv_grad_nchw);
+        if ndim != 4 {
+            return Err(TensorError::InvalidArgument(
+                "mlx kernel grad expected 4D conv-grad tensor",
+            ));
+        }
+        let shape_ptr = raw::mlx_array_shape(conv_grad_nchw);
+        if shape_ptr.is_null() {
+            return Err(TensorError::InvalidArgument(
+                "mlx_array_shape returned null for conv-grad",
+            ));
+        }
+        let dims = std::slice::from_raw_parts(shape_ptr, ndim);
+        (dims[1] as usize, dims[2] as usize, dims[3] as usize)
+    };
+
+    if in_h < conv_h || in_w < conv_w {
+        return Err(TensorError::InvalidArgument(
+            "conv-grad spatial dimensions cannot exceed input dimensions",
+        ));
+    }
+
+    let kernel_h = in_h - conv_h + 1;
+    let kernel_w = in_w - conv_w + 1;
+
+    let input_arr = mlx_array_from_tensor(input);
+    let input_nhwc = mlx_transpose_axes(input_arr, &[0, 2, 3, 1], stream)?;
+    let input_as_batches = mlx_transpose_axes(input_nhwc, &[3, 1, 2, 0], stream)?;
+
+    let grad_nhwc = mlx_transpose_axes(conv_grad_nchw, &[0, 2, 3, 1], stream)?;
+    let grad_as_kernels = mlx_transpose_axes(grad_nhwc, &[3, 1, 2, 0], stream)?;
+
+    let mut kernel_grad_ic_h_w_oc = mlx_array_new();
+    unsafe {
+        mlx_check(
+            raw::mlx_conv2d(
+                &mut kernel_grad_ic_h_w_oc,
+                input_as_batches,
+                grad_as_kernels,
+                1,
+                1,
+                0,
+                0,
+                1,
+                1,
+                1,
+                stream,
+            ),
+            "mlx_conv2d kernel grad failed",
+        )?;
+    }
+
+    let kernel_grad_oc_ic_h_w = mlx_transpose_axes(kernel_grad_ic_h_w_oc, &[3, 0, 1, 2], stream)?;
+    let kernel_grad = mlx_array_to_tensor(kernel_grad_oc_ic_h_w, stream)?;
+
+    if kernel_grad.shape() != (out_channels, in_channels, kernel_h, kernel_w) {
+        return Err(TensorError::IncompatibleShapes {
+            left: kernel_grad.shape(),
+            right: (out_channels, in_channels, kernel_h, kernel_w),
+        });
+    }
+
+    unsafe {
+        let _ = raw::mlx_array_free(input_arr);
+        let _ = raw::mlx_array_free(input_nhwc);
+        let _ = raw::mlx_array_free(input_as_batches);
+        let _ = raw::mlx_array_free(grad_nhwc);
+        let _ = raw::mlx_array_free(grad_as_kernels);
+        let _ = raw::mlx_array_free(kernel_grad_ic_h_w_oc);
+        let _ = raw::mlx_array_free(kernel_grad_oc_ic_h_w);
+    }
+
+    Ok(kernel_grad)
+}
+
+#[cfg(feature = "offloading-mlx")]
+fn mlx_input_grad_native_from_conv_grad_array(
+    conv_grad_nchw: raw::mlx_array,
+    kernels: &Tensor4D,
+    stream: raw::mlx_stream,
+) -> Result<Tensor4D, TensorError> {
+    let conv_grad_nhwc = mlx_transpose_axes(conv_grad_nchw, &[0, 2, 3, 1], stream)?;
+
+    let kernels_arr = mlx_array_from_tensor(kernels);
+    let kernels_ohwi = mlx_transpose_axes(kernels_arr, &[0, 2, 3, 1], stream)?;
+
+    let mut input_grad_nhwc = mlx_array_new();
+    unsafe {
+        mlx_check(
+            raw::mlx_conv_transpose2d(
+                &mut input_grad_nhwc,
+                conv_grad_nhwc,
+                kernels_ohwi,
+                1,
+                1,
+                0,
+                0,
+                1,
+                1,
+                0,
+                0,
+                1,
+                stream,
+            ),
+            "mlx_conv_transpose2d input grad failed",
+        )?;
+    }
+
+    let input_grad_nchw = mlx_transpose_axes(input_grad_nhwc, &[0, 3, 1, 2], stream)?;
+    let input_grad = mlx_array_to_tensor(input_grad_nchw, stream)?;
+
+    unsafe {
+        let _ = raw::mlx_array_free(conv_grad_nhwc);
+        let _ = raw::mlx_array_free(kernels_arr);
+        let _ = raw::mlx_array_free(kernels_ohwi);
+        let _ = raw::mlx_array_free(input_grad_nhwc);
+        let _ = raw::mlx_array_free(input_grad_nchw);
+    }
+
+    Ok(input_grad)
+}
+
+fn cpu_kernel_grad_from_conv_grad(
+    kernels: &Tensor4D,
+    input: &Tensor4D,
+    conv_grad: &Tensor4D,
+) -> Result<Tensor4D, TensorError> {
+    let (_, channels, conv_h, conv_w) = conv_grad.shape();
+    let (_, in_channels, kernel_h, kernel_w) = kernels.shape();
+
+    let mut kernel_grad = Tensor4D::zeros(channels, in_channels, kernel_h, kernel_w);
+    let conv_plane = conv_h * conv_w;
+    let (_, _, in_h, in_w) = input.shape();
+    let input_plane = in_h * in_w;
+    let kernel_plane = kernel_h * kernel_w;
+
+    for out_c in 0..channels {
+        let conv_channel_base = out_c * conv_plane;
+
+        for in_c in 0..in_channels {
+            let input_channel_base = in_c * input_plane;
+            let kernel_channel_base = (out_c * in_channels + in_c) * kernel_plane;
+            for ky in 0..kernel_h {
+                for kx in 0..kernel_w {
+                    let mut accum = 0.0f32;
+                    for oy in 0..conv_h {
+                        let conv_row_base = conv_channel_base + oy * conv_w;
+                        let input_row_base = input_channel_base + (oy + ky) * in_w + kx;
+                        for ox in 0..conv_w {
+                            let grad = conv_grad.as_slice()[conv_row_base + ox];
+                            let inp = input.as_slice()[input_row_base + ox];
+                            accum += grad * inp;
+                        }
+                    }
+                    kernel_grad.as_mut_slice()[kernel_channel_base + ky * kernel_w + kx] = accum;
+                }
+            }
+        }
+    }
+
+    Ok(kernel_grad)
+}
+
+fn cpu_input_grad_from_conv_grad(
+    kernels: &Tensor4D,
+    conv_grad: &Tensor4D,
+) -> Result<Tensor4D, TensorError> {
+    let (_, channels, conv_h, conv_w) = conv_grad.shape();
+    let (_, in_channels, kernel_h, kernel_w) = kernels.shape();
+    let in_h = conv_h + kernel_h - 1;
+    let in_w = conv_w + kernel_w - 1;
+
+    let mut input_grad = Tensor4D::zeros(1, in_channels, in_h, in_w);
+    let input_plane = in_h * in_w;
+    let conv_plane = conv_h * conv_w;
+    let kernel_plane = kernel_h * kernel_w;
+
+    for in_c in 0..in_channels {
+        let input_channel_base = in_c * input_plane;
+        for iy in 0..in_h {
+            for ix in 0..in_w {
+                let mut accum = 0.0f32;
+                for out_c in 0..channels {
+                    let conv_channel_base = out_c * conv_plane;
+                    let kernel_channel_base = (out_c * in_channels + in_c) * kernel_plane;
+                    for ky in 0..kernel_h {
+                        if iy < ky {
+                            continue;
+                        }
+                        let oy = iy - ky;
+                        if oy >= conv_h {
+                            continue;
+                        }
+                        let conv_row_base = conv_channel_base + oy * conv_w;
+                        for kx in 0..kernel_w {
+                            if ix < kx {
+                                continue;
+                            }
+                            let ox = ix - kx;
+                            if ox >= conv_w {
+                                continue;
+                            }
+                            let grad = conv_grad.as_slice()[conv_row_base + ox];
+                            let weight = kernels.as_slice()[kernel_channel_base + ky * kernel_w + kx];
+                            accum += grad * weight;
+                        }
+                    }
+                }
+                input_grad.as_mut_slice()[input_channel_base + iy * in_w + ix] = accum;
+            }
+        }
+    }
+
+    Ok(input_grad)
 }
 
 pub fn mlx_backend() -> MlxTensorBackend {
@@ -233,7 +910,7 @@ fn mlx_conv_blocks_to_feature_vec(
             b1_out
         };
         let gap = final_out.global_average_pool2d_cpu()?;
-        Ok(gap.flatten_batch_features().first().cloned().unwrap_or_default())
+        Ok(gap.first_sample_features())
     }
 
 }

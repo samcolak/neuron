@@ -133,10 +133,11 @@ impl MultiModalBrain {
                 );
 
                 report.trained_examples += 1;
-                *report
-                    .per_label_counts
-                    .entry(normalized_label.clone())
-                    .or_insert(0) += 1;
+                if let Some(count) = report.per_label_counts.get_mut(&normalized_label) {
+                    *count += 1;
+                } else {
+                    report.per_label_counts.insert(normalized_label.clone(), 1);
+                }
             }
         }
 
@@ -164,7 +165,11 @@ impl MultiModalBrain {
             }
 
             report.evaluated_samples += 1;
-            *report.per_label_total.entry(expected.clone()).or_insert(0) += 1;
+            if let Some(count) = report.per_label_total.get_mut(&expected) {
+                *count += 1;
+            } else {
+                report.per_label_total.insert(expected.clone(), 1);
+            }
 
             match self.classify_pattern(&sample.content) {
                 Some(predicted) if predicted.label == expected => {

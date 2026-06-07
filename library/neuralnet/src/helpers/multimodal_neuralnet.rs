@@ -32,7 +32,12 @@ where
             return (None, Vec::new());
         };
 
-        let mut current_uids = self.candidate_uids_for_token(&first_token).as_slice().to_vec();
+        let first_candidates = self.candidate_uids_for_token(&first_token);
+        let mut current_uids: Vec<&str> = first_candidates
+            .as_slice()
+            .iter()
+            .map(String::as_str)
+            .collect();
 
         if current_uids.is_empty() {
             return (None, Vec::new());
@@ -50,16 +55,19 @@ where
 
             let target_uid_set: HashSet<&str> = target_uids.as_slice().iter().map(String::as_str).collect();
             let mut next_uids = Vec::with_capacity(current_uids.len());
+            let mut seen_next_uids: HashSet<&str> = HashSet::with_capacity(current_uids.len());
 
             for uid in &current_uids {
 
-                let Some(node) = dendrites.get(uid) else {
+                let Some(node) = dendrites.get(*uid) else {
                     continue;
                 };
 
                 for connection in node.connections() {
-                    if target_uid_set.contains(connection.to.as_str()) {
-                        next_uids.push(connection.to.clone());
+                    if target_uid_set.contains(connection.to.as_str())
+                        && seen_next_uids.insert(connection.to.as_str())
+                    {
+                        next_uids.push(connection.to.as_str());
                     }
                 }
 
@@ -73,7 +81,7 @@ where
         }
 
         if let Some(last_uid) = current_uids.last()
-            && let Some(last) = dendrites.get(last_uid)
+            && let Some(last) = dendrites.get(*last_uid)
         {
             let mut optional_path = Vec::new();
             for connection in last.connections() {
@@ -110,10 +118,11 @@ where
                 continue;
             }
 
-            let uid = self
-                .candidate_uids_for_token_vec(&token_key)
-                .into_iter()
-                .next()
+            let candidates = self.candidate_uids_for_token(&token_key);
+            let uid = candidates
+                .as_slice()
+                .first()
+                .cloned()
                 .unwrap_or_else(|| self.insert_dendrite_and_index(&token, metadata, dendrite_type));
 
             chosen_path.push(uid);

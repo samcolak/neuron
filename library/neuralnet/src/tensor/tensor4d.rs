@@ -138,6 +138,20 @@ impl Tensor4D {
             .collect()
     }
 
+    /// Returns the feature vector for the first sample without allocating
+    /// the outer `Vec<Vec<f32>>` that `flatten_batch_features` requires.
+    /// Use this wherever only the first batch sample is needed.
+    pub fn first_sample_features(&self) -> Vec<f32> {
+        if self.n == 0 {
+            return Vec::new();
+        }
+        let per_sample = self.c.saturating_mul(self.h).saturating_mul(self.w);
+        if per_sample == 0 {
+            return Vec::new();
+        }
+        self.data[..per_sample.min(self.data.len())].to_vec()
+    }
+
     pub fn get(&self, n: usize, c: usize, h: usize, w: usize) -> Result<f32, TensorError> {
         let idx = self.offset(n, c, h, w)?;
         Ok(self.data[idx])

@@ -7,7 +7,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::tensor::backend::active_backend;
+use crate::tensor::backend::{active_backend, ConvBlockBackwardGradients};
 use crate::tensor::adapters::{
     image_bytes_to_tensor_nchw_resized_with_channels,
     TensorAdapterError,
@@ -109,6 +109,13 @@ pub struct CnnImageClassifier {
     feature_learning_rate: f32,
     head: LinearHead,
     min_confidence: f32,
+    // Gradient accumulator scratch buffers — excluded from serialisation because
+    // CnnImageClassifier uses a separate snapshot struct for persistence.
+    // Reused across train_image_batch calls to eliminate per-batch heap allocation.
+    grad_accum_conv1_kernel: Tensor4D,
+    grad_accum_conv1_bias: Vec<f32>,
+    grad_accum_conv2_kernel: Option<Tensor4D>,
+    grad_accum_conv2_bias: Option<Vec<f32>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,7 +171,6 @@ impl From<LegacyCnnImageClassifierSnapshot> for CnnImageClassifierSnapshot {
 struct ConvBlockCache {
     input: Tensor4D,
     conv_pre_activation: Tensor4D,
-    relu_output: Tensor4D,
     pool_indices: Vec<(usize, usize)>,
     pooled_shape: (usize, usize, usize, usize),
 }
@@ -173,13 +179,6 @@ struct ConvBlockCache {
 struct ForwardCache {
     block1: ConvBlockCache,
     block2: Option<ConvBlockCache>,
-}
-
-#[derive(Debug, Clone)]
-struct ConvBlockBackward {
-    kernel_grad: Tensor4D,
-    bias_grad: Vec<f32>,
-    input_grad: Option<Tensor4D>,
 }
 
 impl CnnImageClassifier {
@@ -303,6 +302,20 @@ impl CnnImageClassifier {
 
         let head = LinearHead::new(feature_dim, normalized_labels.len(), learning_rate)?;
 
+        let (grad_accum_conv1_kernel, grad_accum_conv1_bias) = {
+            let (n, c, h, w) = conv1_kernels.shape();
+            (Tensor4D::zeros(n, c, h, w), vec![0.0f32; conv1_bias.len()])
+        };
+
+        let (grad_accum_conv2_kernel, grad_accum_conv2_bias) =
+            match (&conv2_kernels, &conv2_bias) {
+                (Some(k), Some(b)) => {
+                    let (n, c, h, w) = k.shape();
+                    (Some(Tensor4D::zeros(n, c, h, w)), Some(vec![0.0f32; b.len()]))
+                }
+                _ => (None, None),
+            };
+
         Ok(Self {
             input_height,
             input_width,
@@ -316,6 +329,10 @@ impl CnnImageClassifier {
             feature_learning_rate: learning_rate.max(0.0),
             head,
             min_confidence: 0.5,
+            grad_accum_conv1_kernel,
+            grad_accum_conv1_bias,
+            grad_accum_conv2_kernel,
+            grad_accum_conv2_bias,
         })
     }
 
@@ -449,8 +466,7 @@ impl CnnImageClassifier {
         };
 
         let global = final_output.global_average_pool2d()?;
-        let flat = global.flatten_batch_features();
-        let first = flat.first().cloned().unwrap_or_default();
+        let first = global.first_sample_features();
 
         Ok((
             first,
@@ -462,12 +478,12 @@ impl CnnImageClassifier {
     }
 
     pub fn train_image(&mut self, label: &str, image_bytes: &[u8]) -> Result<f32, CnnImageClassifierError> {
+
         let normalized = label.trim().to_ascii_lowercase();
-        let class_index = self
-            .label_to_index
-            .get(&normalized)
-            .copied()
-            .ok_or_else(|| CnnImageClassifierError::UnknownLabel(normalized.clone()))?;
+        let class_index = match self.label_to_index.get(&normalized).copied() {
+            Some(index) => index,
+            None => return Err(CnnImageClassifierError::UnknownLabel(normalized)),
+        };
 
         let (features, cache) = self.forward_with_cache(image_bytes)?;
         let (loss, feature_grad) = self
@@ -475,7 +491,9 @@ impl CnnImageClassifier {
             .train_step_with_input_gradient(features.as_slice(), class_index)?;
 
         self.backward_feature_extractor(&cache, feature_grad.as_slice())?;
+        
         Ok(loss)
+
     }
 
     pub fn train_image_batch(
@@ -483,6 +501,7 @@ impl CnnImageClassifier {
         label: &str,
         images: &[Vec<u8>],
     ) -> Result<f32, CnnImageClassifierError> {
+
         if images.is_empty() {
             return Err(CnnImageClassifierError::InvalidConfiguration(
                 "cannot train on an empty image batch",
@@ -490,11 +509,10 @@ impl CnnImageClassifier {
         }
 
         let normalized = label.trim().to_ascii_lowercase();
-        let class_index = self
-            .label_to_index
-            .get(&normalized)
-            .copied()
-            .ok_or_else(|| CnnImageClassifierError::UnknownLabel(normalized.clone()))?;
+        let class_index = match self.label_to_index.get(&normalized).copied() {
+            Some(index) => index,
+            None => return Err(CnnImageClassifierError::UnknownLabel(normalized)),
+        };
 
         let mut feature_batch: Vec<Vec<f32>> = Vec::with_capacity(images.len());
         let mut caches: Vec<ForwardCache> = Vec::with_capacity(images.len());
@@ -511,17 +529,26 @@ impl CnnImageClassifier {
             .train_batch_with_input_gradients(feature_batch.as_slice(), targets.as_slice())?;
 
         let batch_size = images.len() as f32;
-        let conv1_snapshot = self.conv1_kernels.clone();
-        let (conv1_out, conv1_in, conv1_h, conv1_w) = conv1_snapshot.shape();
-        let mut conv1_kernel_grad_accum = Tensor4D::zeros(conv1_out, conv1_in, conv1_h, conv1_w);
-        let mut conv1_bias_grad_accum = vec![0.0f32; self.conv1_bias.len()];
 
-        if let (Some(conv2_kernels), Some(conv2_bias)) = (&self.conv2_kernels, &self.conv2_bias) {
-            let conv2_snapshot = conv2_kernels.clone();
-            let (conv2_out, conv2_in, conv2_h, conv2_w) = conv2_snapshot.shape();
-            let mut conv2_kernel_grad_accum =
-                Tensor4D::zeros(conv2_out, conv2_in, conv2_h, conv2_w);
-            let mut conv2_bias_grad_accum = vec![0.0f32; conv2_bias.len()];
+        // Reset cached accumulator buffers — fill(0.0) on hot memory is faster
+        // than allocating fresh zeros from the heap on every training call.
+        self.grad_accum_conv1_kernel.fill(0.0);
+        self.grad_accum_conv1_bias.fill(0.0);
+
+        if self.conv2_kernels.is_some() && self.conv2_bias.is_some() {
+            if let (Some(accum2_k), Some(accum2_b)) = (
+                self.grad_accum_conv2_kernel.as_mut(),
+                self.grad_accum_conv2_bias.as_mut(),
+            ) {
+                accum2_k.fill(0.0);
+                accum2_b.fill(0.0);
+            }
+
+            let conv2_kernels = self.conv2_kernels.as_ref().ok_or(
+                CnnImageClassifierError::InvalidConfiguration(
+                    "second convolution block is missing kernel parameters",
+                ),
+            )?;
 
             for (cache, feature_grad) in caches.iter().zip(feature_grads.iter()) {
                 let block2_cache = cache.block2.as_ref().ok_or(
@@ -535,19 +562,20 @@ impl CnnImageClassifier {
                     feature_grad.as_slice(),
                 )?;
 
-                let block2_backward =
-                    backward_conv_block_gradients(
-                        &conv2_snapshot,
-                        block2_cache,
-                        &block2_pooled_grad,
-                        true,
-                    )?;
-
-                conv2_kernel_grad_accum.add_inplace(&block2_backward.kernel_grad)?;
-                add_bias_grad(
-                    conv2_bias_grad_accum.as_mut_slice(),
-                    block2_backward.bias_grad.as_slice(),
+                let block2_backward = backward_conv_block_gradients(
+                    conv2_kernels,
+                    block2_cache,
+                    &block2_pooled_grad,
+                    true,
                 )?;
+
+                if let (Some(accum2_k), Some(accum2_b)) = (
+                    self.grad_accum_conv2_kernel.as_mut(),
+                    self.grad_accum_conv2_bias.as_mut(),
+                ) {
+                    accum2_k.add_inplace(&block2_backward.kernel_grad)?;
+                    add_bias_grad(accum2_b.as_mut_slice(), block2_backward.bias_grad.as_slice())?;
+                }
 
                 let block2_input_grad = block2_backward.input_grad.as_ref().ok_or(
                     CnnImageClassifierError::InvalidConfiguration(
@@ -563,15 +591,15 @@ impl CnnImageClassifier {
                 }
 
                 let block1_backward = backward_conv_block_gradients(
-                    &conv1_snapshot,
+                    &self.conv1_kernels,
                     &cache.block1,
                     block2_input_grad,
                     false,
                 )?;
 
-                conv1_kernel_grad_accum.add_inplace(&block1_backward.kernel_grad)?;
+                self.grad_accum_conv1_kernel.add_inplace(&block1_backward.kernel_grad)?;
                 add_bias_grad(
-                    conv1_bias_grad_accum.as_mut_slice(),
+                    self.grad_accum_conv1_bias.as_mut_slice(),
                     block1_backward.bias_grad.as_slice(),
                 )?;
             }
@@ -579,8 +607,16 @@ impl CnnImageClassifier {
             apply_conv_gradients(
                 &mut self.conv2_kernels,
                 &mut self.conv2_bias,
-                &conv2_kernel_grad_accum,
-                conv2_bias_grad_accum.as_slice(),
+                self.grad_accum_conv2_kernel.as_ref().ok_or(
+                    CnnImageClassifierError::InvalidConfiguration(
+                        "second convolution block gradient accumulator is missing",
+                    ),
+                )?,
+                self.grad_accum_conv2_bias.as_deref().ok_or(
+                    CnnImageClassifierError::InvalidConfiguration(
+                        "second convolution block bias gradient accumulator is missing",
+                    ),
+                )?,
                 self.feature_learning_rate,
                 batch_size,
             )?;
@@ -592,15 +628,15 @@ impl CnnImageClassifier {
                 )?;
 
                 let block1_backward = backward_conv_block_gradients(
-                    &conv1_snapshot,
+                    &self.conv1_kernels,
                     &cache.block1,
                     &block1_pooled_grad,
                     false,
                 )?;
 
-                conv1_kernel_grad_accum.add_inplace(&block1_backward.kernel_grad)?;
+                self.grad_accum_conv1_kernel.add_inplace(&block1_backward.kernel_grad)?;
                 add_bias_grad(
-                    conv1_bias_grad_accum.as_mut_slice(),
+                    self.grad_accum_conv1_bias.as_mut_slice(),
                     block1_backward.bias_grad.as_slice(),
                 )?;
             }
@@ -609,8 +645,8 @@ impl CnnImageClassifier {
         apply_conv_gradients_single(
             &mut self.conv1_kernels,
             self.conv1_bias.as_mut_slice(),
-            &conv1_kernel_grad_accum,
-            conv1_bias_grad_accum.as_slice(),
+            &self.grad_accum_conv1_kernel,
+            self.grad_accum_conv1_bias.as_slice(),
             self.feature_learning_rate,
             batch_size,
         )?;
@@ -811,6 +847,20 @@ impl CnnImageClassifier {
             ));
         }
 
+        let (grad_accum_conv1_kernel, grad_accum_conv1_bias) = {
+            let (n, c, h, w) = snapshot.conv1_kernels.shape();
+            (Tensor4D::zeros(n, c, h, w), vec![0.0f32; snapshot.conv1_bias.len()])
+        };
+
+        let (grad_accum_conv2_kernel, grad_accum_conv2_bias) =
+            match (&snapshot.conv2_kernels, &snapshot.conv2_bias) {
+                (Some(k), Some(b)) => {
+                    let (n, c, h, w) = k.shape();
+                    (Some(Tensor4D::zeros(n, c, h, w)), Some(vec![0.0f32; b.len()]))
+                }
+                _ => (None, None),
+            };
+
         Ok(Self {
             input_height: snapshot.input_height,
             input_width: snapshot.input_width,
@@ -824,6 +874,10 @@ impl CnnImageClassifier {
             feature_learning_rate: snapshot.feature_learning_rate,
             head: snapshot.head,
             min_confidence: snapshot.min_confidence,
+            grad_accum_conv1_kernel,
+            grad_accum_conv1_bias,
+            grad_accum_conv2_kernel,
+            grad_accum_conv2_bias,
         })
     }
 
@@ -959,7 +1013,6 @@ fn forward_conv_block(
         ConvBlockCache {
             input: input.clone(),
             conv_pre_activation: conv_pre,
-            relu_output: relu,
             pool_indices,
             pooled_shape,
         },
@@ -1020,131 +1073,18 @@ fn backward_conv_block_gradients(
     cache: &ConvBlockCache,
     pooled_grad: &Tensor4D,
     compute_input_grad: bool,
-) -> Result<ConvBlockBackward, CnnImageClassifierError> {
-    let pooled_shape = pooled_grad.shape();
-    if pooled_shape != cache.pooled_shape {
-        return Err(CnnImageClassifierError::GradientTensorShapeMismatch {
-            expected: cache.pooled_shape,
-            actual: pooled_shape,
-        });
-    }
-
-    let (_, channels, pooled_h, pooled_w) = cache.pooled_shape;
-    let (_, _, relu_h, relu_w) = cache.relu_output.shape();
-
-    let mut conv_grad = Tensor4D::zeros(1, channels, relu_h, relu_w);
-    let relu_plane = relu_h * relu_w;
-    let pooled_plane = pooled_h * pooled_w;
-
-    for channel in 0..channels {
-        let conv_channel_base = channel * relu_plane;
-        let pooled_channel_base = channel * pooled_plane;
-
-        for py in 0..pooled_h {
-            for px in 0..pooled_w {
-                let pooled_idx = pooled_channel_base + py * pooled_w + px;
-                let (src_y, src_x) = cache.pool_indices[pooled_idx];
-                let conv_idx = conv_channel_base + src_y * relu_w + src_x;
-                conv_grad.as_mut_slice()[conv_idx] += pooled_grad.as_slice()[pooled_idx];
-            }
-        }
-    }
-
-    for (grad, pre) in conv_grad
-        .as_mut_slice()
-        .iter_mut()
-        .zip(cache.conv_pre_activation.as_slice().iter())
-    {
-        if *pre <= 0.0 {
-            *grad = 0.0;
-        }
-    }
-
-    let (_, in_channels, kernel_h, kernel_w) = kernels.shape();
-    let (_, _, conv_h, conv_w) = cache.conv_pre_activation.shape();
-
-    let mut kernel_grad = Tensor4D::zeros(channels, in_channels, kernel_h, kernel_w);
-    let mut bias_grad = vec![0.0f32; channels];
-    let conv_plane = conv_h * conv_w;
-    let (_, _, in_h, in_w) = cache.input.shape();
-    let input_plane = in_h * in_w;
-    let kernel_plane = kernel_h * kernel_w;
-
-    for (out_c, bias_slot) in bias_grad.iter_mut().enumerate() {
-        let conv_channel_base = out_c * conv_plane;
-        let conv_channel = &conv_grad.as_slice()[conv_channel_base..conv_channel_base + conv_plane];
-        *bias_slot = conv_channel.iter().copied().sum();
-
-        for in_c in 0..in_channels {
-            let input_channel_base = in_c * input_plane;
-            let kernel_channel_base = (out_c * in_channels + in_c) * kernel_plane;
-            for ky in 0..kernel_h {
-                for kx in 0..kernel_w {
-                    let mut accum = 0.0f32;
-                    for oy in 0..conv_h {
-                        let conv_row_base = conv_channel_base + oy * conv_w;
-                        let input_row_base = input_channel_base + (oy + ky) * in_w + kx;
-                        for ox in 0..conv_w {
-                            let grad = conv_grad.as_slice()[conv_row_base + ox];
-                            let inp = cache.input.as_slice()[input_row_base + ox];
-                            accum += grad * inp;
-                        }
-                    }
-                    kernel_grad.as_mut_slice()[kernel_channel_base + ky * kernel_w + kx] = accum;
-                }
-            }
-        }
-    }
-
-    let input_grad = if compute_input_grad {
-        let mut input_grad = Tensor4D::zeros(1, in_channels, in_h, in_w);
-
-        for in_c in 0..in_channels {
-            let input_channel_base = in_c * input_plane;
-            for iy in 0..in_h {
-                for ix in 0..in_w {
-                    let mut accum = 0.0f32;
-                    for out_c in 0..channels {
-                        let conv_channel_base = out_c * conv_plane;
-                        let kernel_channel_base = (out_c * in_channels + in_c) * kernel_plane;
-                        for ky in 0..kernel_h {
-                            if iy < ky {
-                                continue;
-                            }
-                            let oy = iy - ky;
-                            if oy >= conv_h {
-                                continue;
-                            }
-                            let conv_row_base = conv_channel_base + oy * conv_w;
-                            for kx in 0..kernel_w {
-                                if ix < kx {
-                                    continue;
-                                }
-                                let ox = ix - kx;
-                                if ox >= conv_w {
-                                    continue;
-                                }
-                                let grad = conv_grad.as_slice()[conv_row_base + ox];
-                                let weight = kernels.as_slice()[kernel_channel_base + ky * kernel_w + kx];
-                                accum += grad * weight;
-                            }
-                        }
-                    }
-                    input_grad.as_mut_slice()[input_channel_base + iy * in_w + ix] = accum;
-                }
-            }
-        }
-
-        Some(input_grad)
-    } else {
-        None
-    };
-
-    Ok(ConvBlockBackward {
-        kernel_grad,
-        bias_grad,
-        input_grad,
-    })
+) -> Result<ConvBlockBackwardGradients, CnnImageClassifierError> {
+    active_backend()
+        .conv_block_backward_gradients(
+            kernels,
+            &cache.input,
+            &cache.conv_pre_activation,
+            cache.pool_indices.as_slice(),
+            cache.pooled_shape,
+            pooled_grad,
+            compute_input_grad,
+        )
+        .map_err(CnnImageClassifierError::Tensor)
 }
 
 fn add_bias_grad(accum: &mut [f32], grad: &[f32]) -> Result<(), CnnImageClassifierError> {

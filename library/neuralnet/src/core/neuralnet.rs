@@ -53,11 +53,11 @@ where
     N: NetworkNode + Clone,
 {
     let mut children = Vec::new();
-    let mut seen_child_uids: HashSet<String> = HashSet::new();
+    let mut seen_child_uids: HashSet<&str> = HashSet::new();
 
     for parent in dendrites.values().filter(|d| d.data() == data) {
         for connection in parent.connections() {
-            if seen_child_uids.insert(connection.to.clone())
+            if seen_child_uids.insert(connection.to.as_str())
                 && let Some(child) = dendrites.get(&connection.to)
             {
                 children.push(child.clone());
@@ -124,10 +124,6 @@ where
         )
     }
 
-    pub(crate) fn candidate_uids_for_token_vec(&self, token_key: &str) -> Vec<String> {
-        self.candidate_uids_for_token(token_key).as_slice().to_vec()
-    }
-
     pub(crate) fn fuzzy_success_score_for_content(&self, content: &C::Content) -> f64 {
         let tokens = self.tokenize_content(content);
 
@@ -143,26 +139,29 @@ where
                 continue;
             }
 
-            let candidates = self.candidate_uids_for_token_vec(&token_key);
-            if candidates.is_empty() {
+            let candidates = self.candidate_uids_for_token(&token_key);
+            let candidate_slice = candidates.as_slice();
+            if candidate_slice.is_empty() {
                 best_scores.push(0.0);
                 continue;
             }
 
             let mut token_best = 0.0;
 
-            for candidate_uid in candidates {
-                let Some(candidate) = self.dendrites.get(&candidate_uid) else {
+            for candidate_uid in candidate_slice {
+                let Some(candidate) = self.dendrites.get(candidate_uid) else {
                     continue;
                 };
 
+                let candidate_key_owned;
                 let candidate_key = if candidate.normalized_key().is_empty() {
-                    self.token_key_for_index(candidate.data())
+                    candidate_key_owned = self.token_key_for_index(candidate.data());
+                    candidate_key_owned.as_str()
                 } else {
-                    candidate.normalized_key().to_string()
+                    candidate.normalized_key()
                 };
 
-                let (score, _) = self.controller.evaluate_match(&token_key, &candidate_key);
+                let (score, _) = self.controller.evaluate_match(&token_key, candidate_key);
                 if score > token_best {
                     token_best = score;
                 }
@@ -213,12 +212,14 @@ where
                 return;
             }
 
+            let cluster_key = self.controller.cluster_key_for_token(&key);
+
             self.token_index
-                .entry(key.clone())
+                .entry(key)
                 .or_default()
                 .push(uid.to_string());
 
-            if let Some(cluster_key) = self.controller.cluster_key_for_token(&key) {
+            if let Some(cluster_key) = cluster_key {
                 self.token_cluster_index
                     .entry(cluster_key)
                     .or_default()
@@ -244,12 +245,14 @@ where
                 continue;
             }
 
+            let cluster_key = controller.cluster_key_for_token(&key);
+
             self.token_index
-                .entry(key.clone())
+                .entry(key)
                 .or_default()
                 .push(uid.clone());
 
-            if let Some(cluster_key) = controller.cluster_key_for_token(&key) {
+            if let Some(cluster_key) = cluster_key {
                 self.token_cluster_index
                     .entry(cluster_key)
                     .or_default()
@@ -305,14 +308,15 @@ where
 
     pub(crate) fn connected_uid_by_key(&self, from_uid: &str, target_key: &str) -> Option<String> {
         let from_node = self.dendrites.get(from_uid)?;
-        let target_uids = self.candidate_uids_for_token_vec(target_key);
+        let target_uids = self.candidate_uids_for_token(target_key);
+        let target_uid_set: HashSet<&str> = target_uids.as_slice().iter().map(String::as_str).collect();
 
-        if target_uids.is_empty() {
+        if target_uid_set.is_empty() {
             return None;
         }
 
         from_node.connections().iter().find_map(|conn| {
-            if target_uids.iter().any(|uid| uid == &conn.to) {
+            if target_uid_set.contains(conn.to.as_str()) {
                 Some(conn.to.clone())
             } else {
                 None

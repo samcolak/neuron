@@ -1,14 +1,20 @@
-use crate::tensor::backend::TensorBackend;
+use crate::tensor::backend::{
+    cpu_conv_block_backward_gradients,
+    ConvBlockBackwardGradients,
+    TensorBackend,
+};
 use crate::tensor::tensor4d::{Tensor4D, TensorError};
 
 #[cfg(feature = "offloading-cuda")]
-use cudarc::driver::{CudaDevice, LaunchAsync, LaunchConfig};
+use cudarc::driver::{CudaDevice, CudaSlice, DeviceSlice, LaunchAsync, LaunchConfig};
 #[cfg(feature = "offloading-cuda")]
 use cudarc::nvrtc::compile_ptx;
 #[cfg(feature = "offloading-cuda")]
 use std::panic::{self, AssertUnwindSafe};
 #[cfg(feature = "offloading-cuda")]
-use std::sync::{Arc, OnceLock};
+use std::collections::HashMap;
+#[cfg(feature = "offloading-cuda")]
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CudaTensorBackend;
@@ -27,13 +33,6 @@ impl TensorBackend for CudaTensorBackend {
         stride_h: usize,
         stride_w: usize,
     ) -> Result<Tensor4D, TensorError> {
-        #[cfg(feature = "offloading-cuda")]
-        {
-            if let Ok(result) = cuda_conv2d_valid_kernel(input, kernels, bias, stride_h, stride_w) {
-                return Ok(result);
-            }
-        }
-
         cuda_conv2d_valid_fallback(input, kernels, bias, stride_h, stride_w)
     }
 
@@ -45,24 +44,10 @@ impl TensorBackend for CudaTensorBackend {
         stride_h: usize,
         stride_w: usize,
     ) -> Result<Tensor4D, TensorError> {
-        #[cfg(feature = "offloading-cuda")]
-        {
-            if let Ok(result) = cuda_max_pool2d_kernel(input, window_h, window_w, stride_h, stride_w) {
-                return Ok(result);
-            }
-        }
-
         cuda_max_pool2d_fallback(input, window_h, window_w, stride_h, stride_w)
     }
 
     fn global_average_pool2d(&self, input: &Tensor4D) -> Result<Tensor4D, TensorError> {
-        #[cfg(feature = "offloading-cuda")]
-        {
-            if let Ok(result) = cuda_global_average_pool2d_kernel(input) {
-                return Ok(result);
-            }
-        }
-
         cuda_global_average_pool2d_fallback(input)
     }
 
@@ -122,6 +107,63 @@ impl TensorBackend for CudaTensorBackend {
         )
     }
 
+    fn conv_block_backward_gradients(
+        &self,
+        kernels: &Tensor4D,
+        input: &Tensor4D,
+        conv_pre_activation: &Tensor4D,
+        pool_indices: &[(usize, usize)],
+        pooled_shape: (usize, usize, usize, usize),
+        pooled_grad: &Tensor4D,
+        compute_input_grad: bool,
+    ) -> Result<ConvBlockBackwardGradients, TensorError> {
+        cuda_conv_block_backward_gradients_fallback(
+            kernels,
+            input,
+            conv_pre_activation,
+            pool_indices,
+            pooled_shape,
+            pooled_grad,
+            compute_input_grad,
+        )
+    }
+
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cuda_conv_block_backward_gradients_fallback(
+    kernels: &Tensor4D,
+    input: &Tensor4D,
+    conv_pre_activation: &Tensor4D,
+    pool_indices: &[(usize, usize)],
+    pooled_shape: (usize, usize, usize, usize),
+    pooled_grad: &Tensor4D,
+    compute_input_grad: bool,
+) -> Result<ConvBlockBackwardGradients, TensorError> {
+    #[cfg(feature = "offloading-cuda")]
+    {
+        if let Ok(result) = cuda_conv_block_backward_gradients_kernel(
+            kernels,
+            input,
+            conv_pre_activation,
+            pool_indices,
+            pooled_shape,
+            pooled_grad,
+            compute_input_grad,
+        ) {
+            return Ok(result);
+        }
+    }
+
+    cpu_conv_block_backward_gradients(
+        kernels,
+        input,
+        conv_pre_activation,
+        pool_indices,
+        pooled_shape,
+        pooled_grad,
+        compute_input_grad,
+    )
 }
 
 pub fn cuda_backend() -> CudaTensorBackend {
@@ -194,6 +236,59 @@ fn cuda_relu_inplace_fallback(input: &mut Tensor4D) {
 #[cfg(feature = "offloading-cuda")]
 struct CudaKernelContext {
     device: Arc<CudaDevice>,
+    buffer_pool: Mutex<CudaDeviceBufferPool>,
+}
+
+#[cfg(feature = "offloading-cuda")]
+#[derive(Default)]
+struct CudaDeviceBufferPool {
+    f32_buffers: HashMap<&'static str, CudaSlice<f32>>,
+    u32_buffers: HashMap<&'static str, CudaSlice<u32>>,
+}
+
+#[cfg(feature = "offloading-cuda")]
+impl CudaDeviceBufferPool {
+    fn take_f32(
+        &mut self,
+        device: &Arc<CudaDevice>,
+        key: &'static str,
+        len: usize,
+    ) -> Result<CudaSlice<f32>, TensorError> {
+        if let Some(existing) = self.f32_buffers.remove(key)
+            && existing.len() == len
+        {
+            return Ok(existing);
+        }
+
+        device
+            .alloc_zeros::<f32>(len)
+            .map_err(|_| TensorError::InvalidArgument("failed to allocate pooled CUDA f32 buffer"))
+    }
+
+    fn take_u32(
+        &mut self,
+        device: &Arc<CudaDevice>,
+        key: &'static str,
+        len: usize,
+    ) -> Result<CudaSlice<u32>, TensorError> {
+        if let Some(existing) = self.u32_buffers.remove(key)
+            && existing.len() == len
+        {
+            return Ok(existing);
+        }
+
+        device
+            .alloc_zeros::<u32>(len)
+            .map_err(|_| TensorError::InvalidArgument("failed to allocate pooled CUDA u32 buffer"))
+    }
+
+    fn put_f32(&mut self, key: &'static str, buffer: CudaSlice<f32>) {
+        self.f32_buffers.insert(key, buffer);
+    }
+
+    fn put_u32(&mut self, key: &'static str, buffer: CudaSlice<u32>) {
+        self.u32_buffers.insert(key, buffer);
+    }
 }
 
 #[cfg(feature = "offloading-cuda")]
@@ -218,6 +313,18 @@ const CUDA_MAX_POOL2D_VALID_KERNEL: &str = "max_pool2d_valid_nchw_kernel";
 
 #[cfg(feature = "offloading-cuda")]
 const CUDA_GAP2D_KERNEL: &str = "global_average_pool2d_nchw_kernel";
+
+#[cfg(feature = "offloading-cuda")]
+const CUDA_UNPOOL_RELU_GRAD_KERNEL: &str = "unpool_relu_grad_nchw_kernel";
+
+#[cfg(feature = "offloading-cuda")]
+const CUDA_BIAS_GRAD_KERNEL: &str = "conv_bias_grad_nchw_kernel";
+
+#[cfg(feature = "offloading-cuda")]
+const CUDA_KERNEL_GRAD_KERNEL: &str = "conv_kernel_grad_nchw_kernel";
+
+#[cfg(feature = "offloading-cuda")]
+const CUDA_INPUT_GRAD_KERNEL: &str = "conv_input_grad_nchw_kernel";
 
 #[cfg(feature = "offloading-cuda")]
 const CUDA_RELU_SRC: &str = r#"
@@ -358,6 +465,164 @@ void global_average_pool2d_nchw_kernel(
 
     output[idx] = sum / (float)spatial_area;
 }
+
+extern "C" __global__
+void unpool_relu_grad_nchw_kernel(
+    const float* pooled_grad,
+    const float* conv_pre_activation,
+    const unsigned int* pool_indices,
+    const unsigned int* params,
+    float* conv_grad
+) {
+    unsigned int channels = params[0];
+    unsigned int pooled_h = params[1];
+    unsigned int pooled_w = params[2];
+    unsigned int relu_h = params[3];
+    unsigned int relu_w = params[4];
+
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int total = channels * pooled_h * pooled_w;
+    if (idx >= total) {
+        return;
+    }
+
+    unsigned int packed = pool_indices[idx];
+    unsigned int src_y = packed / relu_w;
+    unsigned int src_x = packed % relu_w;
+    if (src_y >= relu_h || src_x >= relu_w) {
+        return;
+    }
+
+    unsigned int conv_idx = ((c * relu_h) + src_y) * relu_w + src_x;
+    float grad = pooled_grad[idx];
+    if (conv_pre_activation[conv_idx] <= 0.0f) {
+        return;
+    }
+
+    atomicAdd(&conv_grad[conv_idx], grad);
+}
+
+extern "C" __global__
+void conv_bias_grad_nchw_kernel(
+    const float* conv_grad,
+    const unsigned int* params,
+    float* bias_grad
+) {
+    unsigned int channels = params[0];
+    unsigned int conv_h = params[1];
+    unsigned int conv_w = params[2];
+
+    unsigned int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= channels) {
+        return;
+    }
+
+    unsigned int plane = conv_h * conv_w;
+    unsigned int base = c * plane;
+    float sum = 0.0f;
+    for (unsigned int i = 0; i < plane; ++i) {
+        sum += conv_grad[base + i];
+    }
+    bias_grad[c] = sum;
+}
+
+extern "C" __global__
+void conv_kernel_grad_nchw_kernel(
+    const float* conv_grad,
+    const float* input,
+    const unsigned int* params,
+    float* kernel_grad
+) {
+    unsigned int channels = params[0];
+    unsigned int in_channels = params[1];
+    unsigned int conv_h = params[2];
+    unsigned int conv_w = params[3];
+    unsigned int in_h = params[4];
+    unsigned int in_w = params[5];
+    unsigned int kernel_h = params[6];
+    unsigned int kernel_w = params[7];
+
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int total = channels * in_channels * kernel_h * kernel_w;
+    if (idx >= total) {
+        return;
+    }
+
+    unsigned int kx = idx % kernel_w;
+    unsigned int ky = (idx / kernel_w) % kernel_h;
+    unsigned int ic = (idx / (kernel_w * kernel_h)) % in_channels;
+    unsigned int oc = idx / (kernel_w * kernel_h * in_channels);
+
+    float sum = 0.0f;
+    for (unsigned int oy = 0; oy < conv_h; ++oy) {
+        unsigned int conv_row_base = (oc * conv_h + oy) * conv_w;
+        unsigned int input_row_base = (ic * in_h + (oy + ky)) * in_w + kx;
+        for (unsigned int ox = 0; ox < conv_w; ++ox) {
+            float grad = conv_grad[conv_row_base + ox];
+            float inp = input[input_row_base + ox];
+            sum += grad * inp;
+        }
+    }
+
+    kernel_grad[idx] = sum;
+}
+
+extern "C" __global__
+void conv_input_grad_nchw_kernel(
+    const float* conv_grad,
+    const float* kernels,
+    const unsigned int* params,
+    float* input_grad
+) {
+    unsigned int channels = params[0];
+    unsigned int in_channels = params[1];
+    unsigned int conv_h = params[2];
+    unsigned int conv_w = params[3];
+    unsigned int in_h = params[4];
+    unsigned int in_w = params[5];
+    unsigned int kernel_h = params[6];
+    unsigned int kernel_w = params[7];
+
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int total = in_channels * in_h * in_w;
+    if (idx >= total) {
+        return;
+    }
+
+    unsigned int ix = idx % in_w;
+    unsigned int iy = (idx / in_w) % in_h;
+    unsigned int ic = idx / (in_w * in_h);
+
+    float sum = 0.0f;
+    for (unsigned int oc = 0; oc < channels; ++oc) {
+        unsigned int kernel_channel_base = (oc * in_channels + ic) * kernel_h * kernel_w;
+        for (unsigned int ky = 0; ky < kernel_h; ++ky) {
+            if (iy < ky) {
+                continue;
+            }
+            unsigned int oy = iy - ky;
+            if (oy >= conv_h) {
+                continue;
+            }
+            unsigned int conv_row_base = (oc * conv_h + oy) * conv_w;
+
+            for (unsigned int kx = 0; kx < kernel_w; ++kx) {
+                if (ix < kx) {
+                    continue;
+                }
+                unsigned int ox = ix - kx;
+                if (ox >= conv_w) {
+                    continue;
+                }
+                float grad = conv_grad[conv_row_base + ox];
+                float weight = kernels[kernel_channel_base + ky * kernel_w + kx];
+                sum += grad * weight;
+            }
+        }
+    }
+
+    input_grad[idx] = sum;
+}
 "#;
 
 #[cfg(feature = "offloading-cuda")]
@@ -386,11 +651,18 @@ fn cuda_kernel_context() -> Result<&'static CudaKernelContext, TensorError> {
                     CUDA_CONV_VALID_KERNEL,
                     CUDA_MAX_POOL2D_VALID_KERNEL,
                     CUDA_GAP2D_KERNEL,
+                    CUDA_UNPOOL_RELU_GRAD_KERNEL,
+                    CUDA_BIAS_GRAD_KERNEL,
+                    CUDA_KERNEL_GRAD_KERNEL,
+                    CUDA_INPUT_GRAD_KERNEL,
                 ],
             )
             .map_err(|err| format!("failed to load CUDA tensor kernels: {err:?}"))?;
 
-        Ok(CudaKernelContext { device })
+        Ok(CudaKernelContext {
+            device,
+            buffer_pool: Mutex::new(CudaDeviceBufferPool::default()),
+        })
     });
 
     context_result
@@ -567,6 +839,7 @@ fn cuda_conv2d_valid_kernel(
         .map_err(|_| TensorError::InvalidArgument("failed to copy CUDA output tensor to host"))?;
 
     Tensor4D::from_vec(batch, out_channels, out_h, out_w, output)
+    
 }
 
 #[cfg(feature = "offloading-cuda")]
@@ -712,7 +985,7 @@ fn cuda_global_average_pool2d_kernel(input: &Tensor4D) -> Result<Tensor4D, Tenso
         .map_err(|_| TensorError::InvalidArgument("failed to copy CUDA GAP output to host"))?;
 
     Tensor4D::from_vec(batch, channels, 1, 1, output)
-    
+
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -774,6 +1047,408 @@ fn cuda_conv_blocks_to_feature_vec_fallback(
     };
 
     let gap = cuda_global_average_pool2d_fallback(&final_out)?;
-    Ok(gap.flatten_batch_features().first().cloned().unwrap_or_default())
+    Ok(gap.first_sample_features())
 
+}
+
+#[cfg(feature = "offloading-cuda")]
+#[allow(clippy::too_many_arguments)]
+fn cuda_conv_block_backward_gradients_kernel(
+    kernels: &Tensor4D,
+    input: &Tensor4D,
+    conv_pre_activation: &Tensor4D,
+    pool_indices: &[(usize, usize)],
+    pooled_shape: (usize, usize, usize, usize),
+    pooled_grad: &Tensor4D,
+    compute_input_grad: bool,
+) -> Result<ConvBlockBackwardGradients, TensorError> {
+    let pooled_grad_shape = pooled_grad.shape();
+    if pooled_grad_shape != pooled_shape {
+        return Err(TensorError::IncompatibleShapes {
+            left: pooled_shape,
+            right: pooled_grad_shape,
+        });
+    }
+
+    if pooled_shape.0 != 1 {
+        return Err(TensorError::InvalidArgument(
+            "cuda conv block backward currently supports batch size 1",
+        ));
+    }
+
+    let (_, channels, pooled_h, pooled_w) = pooled_shape;
+    let (_, _, relu_h, relu_w) = conv_pre_activation.shape();
+
+    let expected_pool_indices = channels
+        .checked_mul(pooled_h)
+        .and_then(|v| v.checked_mul(pooled_w))
+        .ok_or(TensorError::InvalidArgument("pool index shape overflow"))?;
+
+    if pool_indices.len() != expected_pool_indices {
+        return Err(TensorError::ShapeMismatch {
+            expected: expected_pool_indices,
+            actual: pool_indices.len(),
+        });
+    }
+
+    let conv_grad_len = channels
+        .checked_mul(relu_h)
+        .and_then(|v| v.checked_mul(relu_w))
+        .ok_or(TensorError::InvalidArgument("conv grad shape overflow"))?;
+
+    let context = cuda_kernel_context()?;
+
+    let mut pooled_grad_device;
+    let mut conv_pre_device;
+    let mut conv_grad_device;
+    let mut pool_indices_device;
+
+    {
+        let mut pool = context
+            .buffer_pool
+            .lock()
+            .map_err(|_| TensorError::InvalidArgument("cuda device buffer pool lock poisoned"))?;
+
+        pooled_grad_device = pool.take_f32(
+            &context.device,
+            "backprop_pooled_grad",
+            pooled_grad.len(),
+        )?;
+        conv_pre_device = pool.take_f32(
+            &context.device,
+            "backprop_conv_pre",
+            conv_pre_activation.len(),
+        )?;
+        conv_grad_device = pool.take_f32(&context.device, "backprop_conv_grad", conv_grad_len)?;
+        pool_indices_device = pool.take_u32(
+            &context.device,
+            "backprop_pool_indices",
+            expected_pool_indices,
+        )?;
+    }
+
+    context
+        .device
+        .htod_copy_into(pooled_grad.as_slice().to_vec(), &mut pooled_grad_device)
+        .map_err(|_| TensorError::InvalidArgument("failed to copy pooled_grad to CUDA device"))?;
+
+    context
+        .device
+        .htod_copy_into(conv_pre_activation.as_slice().to_vec(), &mut conv_pre_device)
+        .map_err(|_| TensorError::InvalidArgument("failed to copy conv_pre_activation to CUDA device"))?;
+
+    let mut packed_pool_indices = Vec::with_capacity(pool_indices.len());
+    for &(y, x) in pool_indices {
+        if y >= relu_h || x >= relu_w {
+            return Err(TensorError::InvalidArgument(
+                "pool indices exceed relu feature map bounds",
+            ));
+        }
+        packed_pool_indices.push((y * relu_w + x) as u32);
+    }
+
+    context
+        .device
+        .htod_copy_into(packed_pool_indices, &mut pool_indices_device)
+        .map_err(|_| TensorError::InvalidArgument("failed to copy packed pool indices to CUDA device"))?;
+
+    let mut params_device = {
+        let mut pool = context
+            .buffer_pool
+            .lock()
+            .map_err(|_| TensorError::InvalidArgument("cuda device buffer pool lock poisoned"))?;
+        pool.take_u32(&context.device, "backprop_unpool_params", 5)?
+    };
+
+    context
+        .device
+        .htod_copy_into(
+            vec![
+                channels as u32,
+                pooled_h as u32,
+                pooled_w as u32,
+                relu_h as u32,
+                relu_w as u32,
+            ],
+            &mut params_device,
+        )
+        .map_err(|_| TensorError::InvalidArgument("failed to copy unpool params to CUDA device"))?;
+
+    context
+        .device
+        .memset_zeros(&mut conv_grad_device)
+        .map_err(|_| TensorError::InvalidArgument("failed to reset CUDA conv_grad buffer"))?;
+
+    let kernel = context
+        .device
+        .get_func(CUDA_KERNEL_MODULE, CUDA_UNPOOL_RELU_GRAD_KERNEL)
+        .ok_or(TensorError::InvalidArgument(
+            "failed to get CUDA unpool relu-grad kernel function",
+        ))?;
+
+    let launch = LaunchConfig::for_num_elems(expected_pool_indices as u32);
+    unsafe {
+        kernel
+            .launch(
+                launch,
+                (
+                    &pooled_grad_device,
+                    &conv_pre_device,
+                    &pool_indices_device,
+                    &params_device,
+                    &mut conv_grad_device,
+                ),
+            )
+            .map_err(|_| TensorError::InvalidArgument("failed to launch CUDA unpool relu-grad kernel"))?;
+    }
+
+    let (_, in_channels, kernel_h, kernel_w) = kernels.shape();
+    let (_, _, conv_h, conv_w) = conv_pre_activation.shape();
+    let (_, _, in_h, in_w) = input.shape();
+
+    let bias_grad = if channels == 0 {
+        Vec::new()
+    } else {
+        let (mut bias_params_device, mut bias_grad_device) = {
+            let mut pool = context
+                .buffer_pool
+                .lock()
+                .map_err(|_| TensorError::InvalidArgument("cuda device buffer pool lock poisoned"))?;
+            (
+                pool.take_u32(&context.device, "backprop_bias_params", 3)?,
+                pool.take_f32(&context.device, "backprop_bias_grad", channels)?,
+            )
+        };
+
+        context
+            .device
+            .htod_copy_into(
+                vec![channels as u32, conv_h as u32, conv_w as u32],
+                &mut bias_params_device,
+            )
+            .map_err(|_| TensorError::InvalidArgument("failed to copy bias-grad params to CUDA device"))?;
+
+        let bias_kernel = context
+            .device
+            .get_func(CUDA_KERNEL_MODULE, CUDA_BIAS_GRAD_KERNEL)
+            .ok_or(TensorError::InvalidArgument(
+                "failed to get CUDA conv bias-grad kernel function",
+            ))?;
+
+        let bias_launch = LaunchConfig::for_num_elems(channels as u32);
+        unsafe {
+            bias_kernel
+                .launch(
+                    bias_launch,
+                    (&conv_grad_device, &bias_params_device, &mut bias_grad_device),
+                )
+                .map_err(|_| TensorError::InvalidArgument("failed to launch CUDA conv bias-grad kernel"))?;
+        }
+
+        let bias_grad = context
+            .device
+            .dtoh_sync_copy(&bias_grad_device)
+            .map_err(|_| TensorError::InvalidArgument("failed to copy CUDA bias_grad to host"))?;
+
+        {
+            let mut pool = context
+                .buffer_pool
+                .lock()
+                .map_err(|_| TensorError::InvalidArgument("cuda device buffer pool lock poisoned"))?;
+            pool.put_u32("backprop_bias_params", bias_params_device);
+            pool.put_f32("backprop_bias_grad", bias_grad_device);
+        }
+
+        bias_grad
+    };
+
+    let has_kernel_grad = channels > 0 && in_channels > 0 && kernel_h > 0 && kernel_w > 0;
+    let has_input_grad = compute_input_grad && in_channels > 0 && in_h > 0 && in_w > 0;
+
+    let mut grad_params_device = if has_kernel_grad || has_input_grad {
+        let mut params = {
+            let mut pool = context
+                .buffer_pool
+                .lock()
+                .map_err(|_| TensorError::InvalidArgument("cuda device buffer pool lock poisoned"))?;
+            pool.take_u32(&context.device, "backprop_conv_grad_params", 8)?
+        };
+
+        context
+            .device
+            .htod_copy_into(
+                vec![
+                    channels as u32,
+                    in_channels as u32,
+                    conv_h as u32,
+                    conv_w as u32,
+                    in_h as u32,
+                    in_w as u32,
+                    kernel_h as u32,
+                    kernel_w as u32,
+                ],
+                &mut params,
+            )
+            .map_err(|_| TensorError::InvalidArgument("failed to copy conv grad params to CUDA device"))?;
+
+        Some(params)
+    } else {
+        None
+    };
+
+    let kernel_grad = if !has_kernel_grad {
+        Tensor4D::zeros(channels, in_channels, kernel_h, kernel_w)
+    } else {
+        let kernel_grad_len = channels
+            .checked_mul(in_channels)
+            .and_then(|v| v.checked_mul(kernel_h))
+            .and_then(|v| v.checked_mul(kernel_w))
+            .ok_or(TensorError::InvalidArgument("kernel grad shape overflow"))?;
+
+        let (mut input_device, mut kernel_grad_device) = {
+            let mut pool = context
+                .buffer_pool
+                .lock()
+                .map_err(|_| TensorError::InvalidArgument("cuda device buffer pool lock poisoned"))?;
+            (
+                pool.take_f32(&context.device, "backprop_input_tensor", input.len())?,
+                pool.take_f32(&context.device, "backprop_kernel_grad", kernel_grad_len)?,
+            )
+        };
+
+        context
+            .device
+            .htod_copy_into(input.as_slice().to_vec(), &mut input_device)
+            .map_err(|_| TensorError::InvalidArgument("failed to copy input tensor to CUDA device"))?;
+
+        let kernel_grad_kernel = context
+            .device
+            .get_func(CUDA_KERNEL_MODULE, CUDA_KERNEL_GRAD_KERNEL)
+            .ok_or(TensorError::InvalidArgument(
+                "failed to get CUDA conv kernel-grad kernel function",
+            ))?;
+
+        let kernel_grad_launch = LaunchConfig::for_num_elems(kernel_grad_len as u32);
+        unsafe {
+            kernel_grad_kernel
+                .launch(
+                    kernel_grad_launch,
+                    (
+                        &conv_grad_device,
+                        &input_device,
+                        grad_params_device
+                            .as_ref()
+                            .ok_or(TensorError::InvalidArgument("missing conv grad params device buffer"))?,
+                        &mut kernel_grad_device,
+                    ),
+                )
+                .map_err(|_| TensorError::InvalidArgument("failed to launch CUDA conv kernel-grad kernel"))?;
+        }
+
+        let kernel_grad_values: Vec<f32> = context
+            .device
+            .dtoh_sync_copy(&kernel_grad_device)
+            .map_err(|_| TensorError::InvalidArgument("failed to copy CUDA kernel_grad to host"))?;
+
+        {
+            let mut pool = context
+                .buffer_pool
+                .lock()
+                .map_err(|_| TensorError::InvalidArgument("cuda device buffer pool lock poisoned"))?;
+            pool.put_f32("backprop_input_tensor", input_device);
+            pool.put_f32("backprop_kernel_grad", kernel_grad_device);
+        }
+
+        Tensor4D::from_vec(channels, in_channels, kernel_h, kernel_w, kernel_grad_values)?
+    };
+
+    let input_grad = if compute_input_grad {
+        if !has_input_grad {
+            Some(Tensor4D::zeros(1, in_channels, in_h, in_w))
+        } else {
+            let input_grad_len = in_channels
+                .checked_mul(in_h)
+                .and_then(|v| v.checked_mul(in_w))
+                .ok_or(TensorError::InvalidArgument("input grad shape overflow"))?;
+
+            let (mut kernels_device, mut input_grad_device) = {
+                let mut pool = context
+                    .buffer_pool
+                    .lock()
+                    .map_err(|_| TensorError::InvalidArgument("cuda device buffer pool lock poisoned"))?;
+                (
+                    pool.take_f32(&context.device, "backprop_kernels_tensor", kernels.len())?,
+                    pool.take_f32(&context.device, "backprop_input_grad", input_grad_len)?,
+                )
+            };
+
+            context
+                .device
+                .htod_copy_into(kernels.as_slice().to_vec(), &mut kernels_device)
+                .map_err(|_| TensorError::InvalidArgument("failed to copy kernels tensor to CUDA device"))?;
+
+            let input_grad_kernel = context
+                .device
+                .get_func(CUDA_KERNEL_MODULE, CUDA_INPUT_GRAD_KERNEL)
+                .ok_or(TensorError::InvalidArgument(
+                    "failed to get CUDA conv input-grad kernel function",
+                ))?;
+
+            let input_grad_launch = LaunchConfig::for_num_elems(input_grad_len as u32);
+            unsafe {
+                input_grad_kernel
+                    .launch(
+                        input_grad_launch,
+                        (
+                            &conv_grad_device,
+                            &kernels_device,
+                            grad_params_device
+                                .as_ref()
+                                .ok_or(TensorError::InvalidArgument("missing conv grad params device buffer"))?,
+                            &mut input_grad_device,
+                        ),
+                    )
+                    .map_err(|_| TensorError::InvalidArgument("failed to launch CUDA conv input-grad kernel"))?;
+            }
+
+            let input_grad_values: Vec<f32> = context
+                .device
+                .dtoh_sync_copy(&input_grad_device)
+                .map_err(|_| TensorError::InvalidArgument("failed to copy CUDA input_grad to host"))?;
+
+            {
+                let mut pool = context
+                    .buffer_pool
+                    .lock()
+                    .map_err(|_| TensorError::InvalidArgument("cuda device buffer pool lock poisoned"))?;
+                pool.put_f32("backprop_kernels_tensor", kernels_device);
+                pool.put_f32("backprop_input_grad", input_grad_device);
+            }
+
+            Some(Tensor4D::from_vec(1, in_channels, in_h, in_w, input_grad_values)?)
+        }
+    } else {
+        None
+    };
+
+    {
+        let mut pool = context
+            .buffer_pool
+            .lock()
+            .map_err(|_| TensorError::InvalidArgument("cuda device buffer pool lock poisoned"))?;
+        pool.put_f32("backprop_pooled_grad", pooled_grad_device);
+        pool.put_f32("backprop_conv_pre", conv_pre_device);
+        pool.put_f32("backprop_conv_grad", conv_grad_device);
+        pool.put_u32("backprop_pool_indices", pool_indices_device);
+        pool.put_u32("backprop_unpool_params", params_device);
+        if let Some(params) = grad_params_device.take() {
+            pool.put_u32("backprop_conv_grad_params", params);
+        }
+    }
+
+    Ok(ConvBlockBackwardGradients {
+        kernel_grad,
+        bias_grad,
+        input_grad,
+    })
 }

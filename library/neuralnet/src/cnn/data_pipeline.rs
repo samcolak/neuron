@@ -196,13 +196,9 @@ impl CnnDataLoader {
     }
 
     pub fn epoch_batches(&self, epoch: u64) -> Vec<CnnDataBatch> {
-        let mut indices: Vec<usize> = (0..self.records.len()).collect();
-        if self.options.shuffle && indices.len() > 1 {
-            fisher_yates_shuffle(&mut indices, self.options.seed.wrapping_add(epoch));
-        }
-
-        let mut batches = Vec::new();
+        let indices = self.epoch_indices(epoch);
         let batch_size = max(1, self.options.batch_size);
+        let mut batches = Vec::with_capacity(indices.len().div_ceil(batch_size));
         let mut start = 0usize;
 
         while start < indices.len() {
@@ -223,26 +219,46 @@ impl CnnDataLoader {
         batches
     }
 
+    pub(crate) fn epoch_indices(&self, epoch: u64) -> Vec<usize> {
+        let mut indices: Vec<usize> = (0..self.records.len()).collect();
+        if self.options.shuffle && indices.len() > 1 {
+            fisher_yates_shuffle(&mut indices, self.options.seed.wrapping_add(epoch));
+        }
+
+        if self.options.drop_last {
+            let batch_size = max(1, self.options.batch_size);
+            let keep = (indices.len() / batch_size) * batch_size;
+            indices.truncate(keep);
+        }
+
+        indices
+    }
+
+    pub(crate) fn record_at(&self, index: usize) -> Option<&LabeledImageRecord> {
+        self.records.get(index)
+    }
+
     pub fn epoch_as_label_batches(&self, epoch: u64) -> Vec<CnnTrainerBatch> {
-        self.epoch_batches(epoch)
+        let mut grouped: std::collections::BTreeMap<String, Vec<Vec<u8>>> =
+            std::collections::BTreeMap::new();
+
+        for index in self.epoch_indices(epoch) {
+            let Some(record) = self.record_at(index) else {
+                continue;
+            };
+            let normalized = record.label.trim().to_ascii_lowercase();
+            if normalized.is_empty() {
+                continue;
+            }
+            grouped
+                .entry(normalized)
+                .or_default()
+                .push(record.image.clone());
+        }
+
+        grouped
             .into_iter()
-            .flat_map(|batch| {
-                let mut grouped: std::collections::BTreeMap<String, Vec<Vec<u8>>> =
-                    std::collections::BTreeMap::new();
-
-                for record in batch.records {
-                    let normalized = record.label.trim().to_ascii_lowercase();
-                    if normalized.is_empty() {
-                        continue;
-                    }
-                    grouped.entry(normalized).or_default().push(record.image);
-                }
-
-                grouped
-                    .into_iter()
-                    .map(|(label, samples)| CnnTrainerBatch::new(&label, samples))
-                    .collect::<Vec<CnnTrainerBatch>>()
-            })
+            .map(|(label, samples)| CnnTrainerBatch::new(&label, samples))
             .collect()
     }
 }

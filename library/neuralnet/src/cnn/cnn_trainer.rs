@@ -87,8 +87,18 @@ pub struct CnnScaleTrainReport {
 
 fn pop_prefix(samples: &mut Vec<Vec<u8>>, prefix_len: usize) -> Vec<Vec<u8>> {
     let take = prefix_len.min(samples.len());
-    let remainder = samples.split_off(take);
-    std::mem::replace(samples, remainder)
+    if take == 0 {
+        return Vec::new();
+    }
+
+    if take == samples.len() {
+        let mut chunk = Vec::new();
+        std::mem::swap(samples, &mut chunk);
+        *samples = Vec::with_capacity(chunk.capacity());
+        return chunk;
+    }
+
+    samples.drain(..take).collect()
 }
 
 impl CnnImageClassifier {
@@ -131,65 +141,63 @@ impl CnnImageClassifier {
         let mut flush_elapsed_ms = 0.0f64;
         let mut pending_by_label: BTreeMap<String, Vec<Vec<u8>>> = BTreeMap::new();
 
-        for batch in data_loader.epoch_batches(epoch) {
-            report.total_examples += batch.records.len();
+        for index in data_loader.epoch_indices(epoch) {
+            let Some(record) = data_loader.record_at(index) else {
+                continue;
+            };
+            report.total_examples += 1;
 
-            for record in batch.records {
-                let normalized_label = record.label.trim().to_ascii_lowercase();
-                if normalized_label.is_empty() {
-                    continue;
-                }
+            let normalized_label = record.label.trim().to_ascii_lowercase();
+            if normalized_label.is_empty() {
+                continue;
+            }
 
-                let transform_start = Instant::now();
-                let transformed = pipeline.apply(
-                    record.image.as_slice(),
-                    &mut rng,
-                    PipelineMode::Train,
-                );
-                transform_elapsed_ms += transform_start.elapsed().as_secs_f64() * 1000.0;
-                let transformed_len = transformed.len();
+            let transform_start = Instant::now();
+            let transformed = pipeline.apply(
+                record.image.as_slice(),
+                &mut rng,
+                PipelineMode::Train,
+            );
+            transform_elapsed_ms += transform_start.elapsed().as_secs_f64() * 1000.0;
+            let transformed_len = transformed.len();
 
-                let should_flush = {
-                    let pending = pending_by_label
-                        .entry(normalized_label.clone())
-                        .or_default();
-                    pending.push(transformed);
-                    pending.len() >= effective_batch_size
-                };
-                inflight_samples = inflight_samples.saturating_add(1);
-                inflight_bytes = inflight_bytes.saturating_add(transformed_len);
-
-                max_inflight_samples = max_inflight_samples.max(inflight_samples);
-                max_inflight_bytes = max_inflight_bytes.max(inflight_bytes);
-
-                if should_flush {
-                    let train_chunk = {
-                        let pending = pending_by_label
-                            .entry(normalized_label.clone())
-                            .or_default();
-                        pop_prefix(pending, effective_batch_size)
-                    };
-                    let train_count = train_chunk.len();
-                    let train_chunk_bytes = train_chunk.iter().map(Vec::len).sum::<usize>();
-                    inflight_samples = inflight_samples.saturating_sub(train_count);
-                    inflight_bytes = inflight_bytes.saturating_sub(train_chunk_bytes);
-
-                    let update_start = Instant::now();
-                    if self
-                        .train_image_batch(&normalized_label, train_chunk.as_slice())
-                        .is_ok()
-                    {
-                        report.trained_examples += train_count;
-                        *report
-                            .per_label_counts
-                            .entry(normalized_label.clone())
-                            .or_insert(0) += train_count;
-                        optimizer_steps += 1;
-                    }
-                    update_elapsed_ms += update_start.elapsed().as_secs_f64() * 1000.0;
+            let mut train_chunk = None;
+            {
+                let pending = pending_by_label
+                    .entry(normalized_label.clone())
+                    .or_insert_with(|| Vec::with_capacity(effective_batch_size));
+                pending.push(transformed);
+                if pending.len() >= effective_batch_size {
+                    train_chunk = Some(pop_prefix(pending, effective_batch_size));
                 }
             }
 
+            inflight_samples = inflight_samples.saturating_add(1);
+            inflight_bytes = inflight_bytes.saturating_add(transformed_len);
+
+            max_inflight_samples = max_inflight_samples.max(inflight_samples);
+            max_inflight_bytes = max_inflight_bytes.max(inflight_bytes);
+
+            if let Some(train_chunk) = train_chunk {
+                let train_count = train_chunk.len();
+                let train_chunk_bytes = train_chunk.iter().map(Vec::len).sum::<usize>();
+                inflight_samples = inflight_samples.saturating_sub(train_count);
+                inflight_bytes = inflight_bytes.saturating_sub(train_chunk_bytes);
+
+                let update_start = Instant::now();
+                if self
+                    .train_image_batch(&normalized_label, train_chunk.as_slice())
+                    .is_ok()
+                {
+                    report.trained_examples += train_count;
+                    *report
+                        .per_label_counts
+                        .entry(normalized_label)
+                        .or_insert(0) += train_count;
+                    optimizer_steps += 1;
+                }
+                update_elapsed_ms += update_start.elapsed().as_secs_f64() * 1000.0;
+            }
         }
 
         for (label, pending) in &mut pending_by_label {
@@ -203,7 +211,11 @@ impl CnnImageClassifier {
                 let flush_start = Instant::now();
                 if self.train_image_batch(label, train_chunk.as_slice()).is_ok() {
                     report.trained_examples += train_count;
-                    *report.per_label_counts.entry(label.clone()).or_insert(0) += train_count;
+                    if let Some(count) = report.per_label_counts.get_mut(label) {
+                        *count += train_count;
+                    } else {
+                        report.per_label_counts.insert(label.clone(), train_count);
+                    }
                     optimizer_steps += 1;
                 }
                 flush_elapsed_ms += flush_start.elapsed().as_secs_f64() * 1000.0;
@@ -211,6 +223,7 @@ impl CnnImageClassifier {
         }
 
         report.skipped_examples = report.total_examples.saturating_sub(report.trained_examples);
+        let total_examples = report.total_examples;
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
         let elapsed_secs = (elapsed_ms / 1000.0).max(1e-9);
 
@@ -221,7 +234,7 @@ impl CnnImageClassifier {
             effective_batch_size,
             optimizer_steps,
             elapsed_ms,
-            throughput_samples_per_sec: data_loader.len() as f64 / elapsed_secs,
+            throughput_samples_per_sec: total_examples as f64 / elapsed_secs,
             max_inflight_samples,
             max_inflight_bytes,
             transform_elapsed_ms,
@@ -252,7 +265,11 @@ impl CnnImageClassifier {
             }
 
             report.evaluated_samples += 1;
-            *report.per_label_total.entry(expected.clone()).or_insert(0) += 1;
+            if let Some(count) = report.per_label_total.get_mut(&expected) {
+                *count += 1;
+            } else {
+                report.per_label_total.insert(expected.clone(), 1);
+            }
 
             let transformed = pipeline.apply(
                 sample.image.as_slice(),
@@ -263,7 +280,11 @@ impl CnnImageClassifier {
             match self.predict_with_confidence(transformed.as_slice()) {
                 Ok(Some((predicted, _confidence))) if predicted == expected => {
                     report.correct_predictions += 1;
-                    *report.per_label_correct.entry(expected.clone()).or_insert(0) += 1;
+                    if let Some(count) = report.per_label_correct.get_mut(&expected) {
+                        *count += 1;
+                    } else {
+                        report.per_label_correct.insert(expected.clone(), 1);
+                    }
                     increment_confusion_count(&mut report.confusion_matrix, expected, predicted);
                 }
                 Ok(Some((predicted, _confidence))) => {
@@ -302,10 +323,11 @@ impl CnnImageClassifier {
             for image in &batch.samples {
                 if self.train_image(&normalized_label, image.as_slice()).is_ok() {
                     report.trained_examples += 1;
-                    *report
-                        .per_label_counts
-                        .entry(normalized_label.clone())
-                        .or_insert(0) += 1;
+                    if let Some(count) = report.per_label_counts.get_mut(&normalized_label) {
+                        *count += 1;
+                    } else {
+                        report.per_label_counts.insert(normalized_label.clone(), 1);
+                    }
                 }
             }
         }
@@ -333,12 +355,20 @@ impl CnnImageClassifier {
             }
 
             report.evaluated_samples += 1;
-            *report.per_label_total.entry(expected.clone()).or_insert(0) += 1;
+            if let Some(count) = report.per_label_total.get_mut(&expected) {
+                *count += 1;
+            } else {
+                report.per_label_total.insert(expected.clone(), 1);
+            }
 
             match self.predict_with_confidence(sample.image.as_slice()) {
                 Ok(Some((predicted, _confidence))) if predicted == expected => {
                     report.correct_predictions += 1;
-                    *report.per_label_correct.entry(expected.clone()).or_insert(0) += 1;
+                    if let Some(count) = report.per_label_correct.get_mut(&expected) {
+                        *count += 1;
+                    } else {
+                        report.per_label_correct.insert(expected.clone(), 1);
+                    }
                     increment_confusion_count(&mut report.confusion_matrix, expected, predicted);
                 }
                 Ok(Some((predicted, _confidence))) => {
