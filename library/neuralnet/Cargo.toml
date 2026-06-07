@@ -12,7 +12,7 @@ categories = ["science", "algorithms"]
 [features]
 default = ["optimizer-adam"]
 optimizer-adam = []
-offloading-cuda = []
+offloading-cuda = ["dep:cudarc"]
 offloading-mlx = ["dep:apple-mlx"]
 
 [dependencies]
@@ -23,3 +23,4 @@ uuid = { version = "1.22.0", features = ["serde", "v4", "v7", "fast-rng"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 csv = "1"
 apple-mlx = { path = "vendor/apple-mlx", optional = true }
+cudarc = { version = "0.12", optional = true, default-features = false, features = ["driver", "nvrtc", "cuda-12000"] }

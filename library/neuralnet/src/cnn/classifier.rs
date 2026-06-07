@@ -7,6 +7,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::tensor::backend::active_backend;
 use crate::tensor::adapters::{
     image_bytes_to_tensor_nchw_resized_with_channels,
     TensorAdapterError,
@@ -382,37 +383,29 @@ impl CnnImageClassifier {
             true,
         )?;
 
-        let block1_output = input.conv_relu_max_pool2d_valid(
-            &self.conv1_kernels,
-            Some(self.conv1_bias.as_slice()),
-            1,
-            1,
-            2,
-            2,
-            2,
-            2,
-        )?;
-
-        let final_output = if let (Some(conv2_kernels), Some(conv2_bias)) =
+        let backend = active_backend();
+        let block2 = if let (Some(conv2_kernels), Some(conv2_bias)) =
             (&self.conv2_kernels, &self.conv2_bias)
         {
-            block1_output.conv_relu_max_pool2d_valid(
-                conv2_kernels,
-                Some(conv2_bias.as_slice()),
-                1,
-                1,
-                2,
-                2,
-                2,
-                2,
-            )?
+            Some((conv2_kernels, conv2_bias.as_slice()))
         } else {
-            block1_output
+            None
         };
 
-        let global = final_output.global_average_pool2d()?;
-        let flat = global.flatten_batch_features();
-        Ok(flat.first().cloned().unwrap_or_default())
+        backend
+            .conv_blocks_to_feature_vec(
+                &input,
+                &self.conv1_kernels,
+                self.conv1_bias.as_slice(),
+                block2,
+                1,
+                1,
+                2,
+                2,
+                2,
+                2,
+            )
+            .map_err(CnnImageClassifierError::Tensor)
     }
 
     fn forward_with_cache(

@@ -206,18 +206,47 @@ mod tests {
     }
 
     #[test]
-    fn cuda_backend_stub_reports_unavailable_ops() {
+    fn cuda_backend_matches_cpu_ops_in_staged_mode() {
         let backend = cuda_backend();
-        let input = Tensor4D::zeros(1, 1, 3, 3);
-        let kernels = Tensor4D::zeros(1, 1, 2, 2);
+        let input = Tensor4D::from_vec(
+            1,
+            1,
+            3,
+            3,
+            vec![
+                1.0, 2.0, 3.0,
+                4.0, 5.0, 6.0,
+                7.0, 8.0, 9.0,
+            ],
+        )
+        .unwrap_or_else(|_| panic!("input tensor should be valid"));
+        let kernels = Tensor4D::from_vec(1, 1, 2, 2, vec![1.0, 0.0, 0.0, 1.0])
+            .unwrap_or_else(|_| panic!("kernel tensor should be valid"));
 
-        let conv = backend.conv2d_valid(&input, &kernels, None, 1, 1);
-        assert!(matches!(
-            conv,
-            Err(TensorError::InvalidArgument(
-                "cuda conv2d stub is not implemented yet"
-            ))
-        ));
+        let conv_via_cpu = input
+            .conv2d_valid(&kernels, Some(&[1.0]), 1, 1)
+            .unwrap_or_else(|_| panic!("cpu convolution should succeed"));
+        let conv_via_cuda_backend = backend
+            .conv2d_valid(&input, &kernels, Some(&[1.0]), 1, 1)
+            .unwrap_or_else(|_| panic!("cuda staged convolution should succeed"));
+
+        let pool_via_cpu = conv_via_cpu
+            .max_pool2d(2, 2, 1, 1)
+            .unwrap_or_else(|_| panic!("cpu max pooling should succeed"));
+        let pool_via_cuda_backend = backend
+            .max_pool2d(&conv_via_cuda_backend, 2, 2, 1, 1)
+            .unwrap_or_else(|_| panic!("cuda staged max pooling should succeed"));
+
+        let gap_via_cpu = pool_via_cpu
+            .global_average_pool2d()
+            .unwrap_or_else(|_| panic!("cpu global average pooling should succeed"));
+        let gap_via_cuda_backend = backend
+            .global_average_pool2d(&pool_via_cuda_backend)
+            .unwrap_or_else(|_| panic!("cuda staged global average pooling should succeed"));
+
+        assert_eq!(conv_via_cuda_backend, conv_via_cpu);
+        assert_eq!(pool_via_cuda_backend, pool_via_cpu);
+        assert_eq!(gap_via_cuda_backend, gap_via_cpu);
 
         assert_eq!(backend.name(), "cuda");
         assert_eq!(cuda_backend_available(), cfg!(feature = "offloading-cuda"));
