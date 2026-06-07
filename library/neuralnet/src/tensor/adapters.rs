@@ -340,9 +340,8 @@ fn resize_interleaved_nearest(
             let src_base = ((src_y * in_width) + src_x) * channels;
             let dst_base = ((out_y * out_width) + out_x) * channels;
 
-            for channel in 0..channels {
-                resized[dst_base + channel] = image[src_base + channel];
-            }
+            resized[dst_base..(dst_base + channels)]
+                .copy_from_slice(&image[src_base..(src_base + channels)]);
         }
     }
 

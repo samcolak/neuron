@@ -1,0 +1,26 @@
+@startuml
+left to right direction
+skinparam packageStyle rectangle
+skinparam shadowing false
+skinparam monochrome true
+skinparam componentStyle rectangle
+
+title neuralnet/src/cnn
+
+package "src/cnn" {
+  artifact "classifier.rs" as classifier
+  artifact "feature_extractor.rs" as extractor
+  artifact "cnn_trainer.rs" as trainer
+}
+
+component "src/tensor" as tensor <<module>>
+component "src/training" as training <<module>>
+component "image crate" as image <<external>>
+
+extractor --> tensor : adapters / tensor types
+extractor --> image : image decoding and resizing
+classifier --> tensor : tensor ops and shapes
+classifier --> training : linear head and metrics
+trainer --> classifier : train classifier
+trainer --> training : trainer / metrics utilities
+@enduml

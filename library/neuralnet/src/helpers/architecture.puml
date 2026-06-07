@@ -1,0 +1,34 @@
+@startuml
+left to right direction
+skinparam packageStyle rectangle
+skinparam shadowing false
+skinparam monochrome true
+skinparam componentStyle rectangle
+
+title neuralnet/src/helpers
+
+package "src/helpers" {
+  artifact "axon.rs" as axon
+  artifact "image_io.rs" as image_io
+  artifact "multimodal_controller.rs" as controller
+  artifact "multimodal_neuralnet.rs" as multimodal_neuralnet
+  artifact "pattern_classifier.rs" as pattern_classifier
+  artifact "text_similarity.rs" as text_similarity
+}
+
+component "src/core" as core <<module>>
+component "src/dendrites" as dendrites <<module>>
+component "image crate" as image <<external>>
+
+controller --> core : node metadata / controller traits
+controller --> text_similarity : fuzziness scoring
+image_io --> image : decode png/jpeg
+multimodal_neuralnet --> core : neural net types
+multimodal_neuralnet --> image_io : image loading
+multimodal_neuralnet --> controller : multimodal inputs
+multimodal_neuralnet --> dendrites : multimodal dendrite types
+pattern_classifier --> controller : input classification
+pattern_classifier --> core : controller traits
+axon --> core : serialized edge data only
+text_similarity --> core : no direct dependency
+@enduml

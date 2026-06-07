@@ -256,7 +256,7 @@ impl CnnImageClassifier {
                 "feature channel configuration must contain one or two layers",
             ));
         }
-        if feature_channels.iter().any(|channels| *channels == 0) {
+        if feature_channels.contains(&0) {
             return Err(CnnImageClassifierError::InvalidConfiguration(
                 "feature channel counts must be greater than zero",
             ));
@@ -971,14 +971,14 @@ fn backward_conv_block_gradients(
     let mut kernel_grad = Tensor4D::zeros(channels, in_channels, kernel_h, kernel_w);
     let mut bias_grad = vec![0.0f32; channels];
 
-    for out_c in 0..channels {
+    for (out_c, bias_slot) in bias_grad.iter_mut().enumerate() {
         let mut bias_acc = 0.0f32;
         for oy in 0..conv_h {
             for ox in 0..conv_w {
                 bias_acc += conv_grad.get(0, out_c, oy, ox)?;
             }
         }
-        bias_grad[out_c] = bias_acc;
+        *bias_slot = bias_acc;
 
         for in_c in 0..in_channels {
             for ky in 0..kernel_h {
@@ -1194,7 +1194,7 @@ fn infer_square_dimensions_and_channels(image_bytes: &[u8]) -> Option<(usize, us
     let len = image_bytes.len();
 
     for channels in [1usize, 3usize, 4usize] {
-        if len % channels != 0 {
+        if !len.is_multiple_of(channels) {
             continue;
         }
 

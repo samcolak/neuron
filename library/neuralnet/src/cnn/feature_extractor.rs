@@ -144,7 +144,7 @@ fn infer_square_dimensions_and_channels(image_bytes: &[u8]) -> Option<(usize, us
     let len = image_bytes.len();
 
     for channels in [1usize, 3usize, 4usize] {
-        if len % channels != 0 {
+        if !len.is_multiple_of(channels) {
             continue;
         }
 
@@ -245,7 +245,7 @@ mod tests {
     #[test]
     fn extractor_accepts_rgb_square_image_bytes() {
         let extractor = CnnFeatureExtractor::new(16, 16);
-        let grayscale = vec![32u8; 64];
+        let grayscale = [32u8; 64];
         let rgb: Vec<u8> = grayscale
             .iter()
             .flat_map(|value| [*value, *value, *value])

@@ -1,0 +1,41 @@
+@startuml
+left to right direction
+skinparam packageStyle rectangle
+skinparam shadowing false
+skinparam monochrome true
+skinparam componentStyle rectangle
+
+title neuralnet/src/training
+
+package "src/training" {
+  artifact "dense_baseline.rs" as dense_baseline
+  artifact "linear_head.rs" as linear_head
+  artifact "metrics.rs" as metrics
+  artifact "trainer.rs" as trainer
+  artifact "training_loop.rs" as training_loop
+}
+
+component "src/core" as core <<module>>
+component "src/dendrites" as dendrites <<module>>
+component "src/helpers" as helpers <<module>>
+
+trainer --> core : multimodal brain and node metadata
+trainer --> helpers : multimodal inputs
+trainer --> dendrites : label types
+trainer --> metrics : quality metrics
+
+training_loop --> core : model and brain abstractions
+training_loop --> dense_baseline : baseline trainer
+training_loop --> trainer : evaluation / reports
+training_loop --> helpers : multimodal inputs
+training_loop --> dendrites : label types
+
+dense_baseline --> core : trainable model and node controller
+dense_baseline --> helpers : multimodal controller
+dense_baseline --> dendrites : label types
+dense_baseline --> metrics : evaluation helpers
+dense_baseline --> trainer : batch reports
+
+metrics --> trainer : report structures
+linear_head --> core : standalone numeric utility
+@enduml

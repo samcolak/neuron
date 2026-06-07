@@ -1,0 +1,43 @@
+@startuml
+left to right direction
+skinparam packageStyle rectangle
+skinparam shadowing false
+skinparam monochrome true
+skinparam componentStyle rectangle
+
+title neuralnet/src/tensor
+
+package "src/tensor" {
+  artifact "adapters.rs" as adapters
+  artifact "backend.rs" as backend
+  artifact "image_utils.rs" as image_utils
+  artifact "tensor4d.rs" as tensor4d
+  artifact "tensor_io.rs" as tensor_io
+  package "offloading" as offloading {
+    artifact "cpu_backend.rs" as cpu_backend
+    artifact "cuda_backend.rs" as cuda_backend
+    artifact "mlx_backend.rs" as mlx_backend
+  }
+}
+
+component "src/helpers" as helpers <<module>>
+component "image crate" as image <<external>>
+component "serde" as serde <<external>>
+
+backend --> tensor4d : active backend interface
+backend --> offloading : runtime backend selection
+
+tensor4d --> backend : active backend access
+adapters --> image_utils : resize / crop helpers
+adapters --> tensor4d : tensor conversion
+adapters --> helpers : multimodal inputs
+tensor_io --> tensor4d : tensor persistence
+tensor_io --> serde : serialize / deserialize
+cpu_backend --> backend
+cpu_backend --> tensor4d
+cuda_backend --> backend
+cuda_backend --> tensor4d
+mlx_backend --> backend
+mlx_backend --> tensor4d
+image_utils --> image : image type support
+@enduml

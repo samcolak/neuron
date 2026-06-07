@@ -1,0 +1,45 @@
+@startuml
+left to right direction
+skinparam packageStyle rectangle
+skinparam shadowing false
+skinparam monochrome true
+skinparam componentStyle rectangle
+
+title neuralnet/src/core
+
+package "src/core" {
+  artifact "brain.rs" as brain
+  artifact "integration.rs" as integration
+  artifact "model.rs" as model
+  artifact "neuralnet.rs" as neuralnet
+  artifact "nodenet.rs" as nodenet
+}
+
+component "src/cnn" as cnn <<module>>
+component "src/dendrites" as dendrites <<module>>
+component "src/helpers" as helpers <<module>>
+component "src/tensor" as tensor <<module>>
+component "src/training" as training <<module>>
+
+brain --> cnn : feature extractor
+brain --> helpers : multimodal controller / classifier
+brain --> dendrites : dendrite types
+brain --> tensor : tensor-backed image path
+
+integration --> brain
+integration --> model
+integration --> nodenet
+integration --> helpers
+integration --> training
+
+model --> brain
+model --> nodenet
+model --> helpers
+model --> training
+model --> dendrites
+
+neuralnet --> nodenet
+neuralnet --> dendrites
+nodenet --> helpers : axons / node network
+nodenet --> dendrites : node types
+@enduml

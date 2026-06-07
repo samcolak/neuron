@@ -1,0 +1,27 @@
+@startuml
+left to right direction
+skinparam packageStyle rectangle
+skinparam shadowing false
+skinparam monochrome true
+skinparam componentStyle rectangle
+
+title neuralnet/src/dendrites
+
+package "src/dendrites" {
+  artifact "image_dendrite.rs" as image_dendrite
+  artifact "multimodal_dendrite.rs" as multimodal_dendrite
+  artifact "text_dendrite.rs" as text_dendrite
+}
+
+component "src/core" as core <<module>>
+component "src/helpers" as helpers <<module>>
+
+text_dendrite --> core : node metadata and network node traits
+text_dendrite --> helpers : axon connections
+image_dendrite --> core : node metadata and network node traits
+image_dendrite --> helpers : axon connections
+image_dendrite --> text_dendrite : shared dendrite enum
+multimodal_dendrite --> core : node metadata and network node traits
+multimodal_dendrite --> helpers : axon connections
+multimodal_dendrite --> text_dendrite : shared dendrite enum
+@enduml

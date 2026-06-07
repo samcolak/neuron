@@ -233,13 +233,13 @@ impl Tensor4D {
             ));
         }
 
-        if let Some(bias_values) = bias {
-            if bias_values.len() != kernels.n {
-                return Err(TensorError::ShapeMismatch {
-                    expected: kernels.n,
-                    actual: bias_values.len(),
-                });
-            }
+        if let Some(bias_values) = bias
+            && bias_values.len() != kernels.n
+        {
+            return Err(TensorError::ShapeMismatch {
+                expected: kernels.n,
+                actual: bias_values.len(),
+            });
         }
 
         let out_h = ((self.h - kernels.h) / stride_h) + 1;

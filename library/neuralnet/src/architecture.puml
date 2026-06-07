@@ -1,0 +1,95 @@
+@startuml
+left to right direction
+skinparam packageStyle rectangle
+skinparam shadowing false
+skinparam monochrome true
+skinparam componentStyle rectangle
+
+title neuralnet source tree overview
+
+package "src" {
+  artifact "lib.rs" as lib
+
+  package "core" as core {
+    artifact "brain.rs"
+    artifact "integration.rs"
+    artifact "model.rs"
+    artifact "neuralnet.rs"
+    artifact "nodenet.rs"
+  }
+
+  package "cnn" as cnn {
+    artifact "classifier.rs"
+    artifact "feature_extractor.rs"
+    artifact "cnn_trainer.rs"
+  }
+
+  package "training" as training {
+    artifact "trainer.rs"
+    artifact "training_loop.rs"
+    artifact "dense_baseline.rs"
+    artifact "metrics.rs"
+    artifact "linear_head.rs"
+  }
+
+  package "dendrites" as dendrites {
+    artifact "image_dendrite.rs"
+    artifact "multimodal_dendrite.rs"
+    artifact "text_dendrite.rs"
+  }
+
+  package "helpers" as helpers {
+    artifact "axon.rs"
+    artifact "multimodal_controller.rs"
+    artifact "multimodal_neuralnet.rs"
+    artifact "pattern_classifier.rs"
+    artifact "image_io.rs"
+    artifact "text_similarity.rs"
+  }
+
+  package "tensor" as tensor {
+    artifact "adapters.rs"
+    artifact "backend.rs"
+    artifact "image_utils.rs"
+    artifact "tensor4d.rs"
+    artifact "tensor_io.rs"
+    package "offloading" as offloading {
+      artifact "cpu_backend.rs"
+      artifact "cuda_backend.rs"
+      artifact "mlx_backend.rs"
+    }
+  }
+}
+
+component "serde" as serde <<external>>
+component "serde_json" as serde_json <<external>>
+component "bincode" as bincode <<external>>
+component "uuid" as uuid <<external>>
+component "image" as image <<external>>
+
+lib --> core
+lib --> cnn
+lib --> training
+lib --> dendrites
+lib --> helpers
+lib --> tensor
+
+core --> helpers
+core --> tensor
+cnn --> tensor
+cnn --> image
+training --> core
+training --> helpers
+training --> tensor
+helpers --> core
+helpers --> tensor
+helpers --> dendrites
+dendrites --> core
+tensor --> image
+
+tensor ..> serde
+core ..> serde_json
+helpers ..> bincode
+helpers ..> uuid
+cnn ..> image
+@enduml
