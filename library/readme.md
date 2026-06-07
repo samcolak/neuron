@@ -10,7 +10,6 @@ NB. Whilst i am not a qualified / certified mathematician, alot of work on Tenso
 
 Written by Samuel Colak (sam@samcolak.com)
 
-
 ## What Changed
 
 - Pattern classifier + trainer bridge
@@ -19,6 +18,7 @@ Written by Samuel Colak (sam@samcolak.com)
 - CNN feature extractor for image-to-feature token conversion
 - Batch image training/evaluation with confusion matrix + micro metrics
 - App walkthrough integration for the CNN image path
+- Support for CUDA (Not implemented YET!), MLX (Implemented) and CPU (Implemented) offloading of tensor models
 
 ## Project Layout
 
