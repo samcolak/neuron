@@ -5,6 +5,7 @@ use crate::tensor::tensor4d::{Tensor4D, TensorError};
 pub struct CpuTensorBackend;
 
 impl TensorBackend for CpuTensorBackend {
+    
     fn name(&self) -> &'static str {
         "cpu"
     }
@@ -38,6 +39,7 @@ impl TensorBackend for CpuTensorBackend {
     fn relu_inplace(&self, input: &mut Tensor4D) {
         input.relu_inplace_cpu()
     }
+
 }
 
 pub fn cpu_backend() -> CpuTensorBackend {

@@ -36,22 +36,29 @@ xcrun -sdk macosx metal -v
 
 Head to the root of the directory in which you have cloned the repo.
 
-If you are using the crate-based MLX path and already have MLX installed locally, you can skip the source build steps below.
+This repo does not ship MLX binaries in-source anymore. You must point the build at an external MLX prefix that already contains:
 
-Only run these commands if you want to build MLX from local source in `.deps/mlx` and install it into `.local/apple-mlx`:
+- `lib/libmlx.dylib`
+- `lib/libjaccl.dylib`
+- `lib/mlx.metallib`
+- `share/cmake/MLX/MLXConfig.cmake`
+
+You can do that in either of these ways:
 
 ```bash
-rm -rf .deps/mlx/build .local/apple-mlx
-cmake -S .deps/mlx -B .deps/mlx/build \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DBUILD_SHARED_LIBS=ON \
-  -DMLX_BUILD_TESTS=OFF \
-  -DMLX_BUILD_EXAMPLES=OFF \
-  -DMLX_BUILD_BENCHMARKS=OFF \
-  -DMLX_BUILD_PYTHON_BINDINGS=OFF \
-  -DMLX_BUILD_METAL=ON
-cmake --build .deps/mlx/build -j
-cmake --install .deps/mlx/build --prefix .local/apple-mlx
+export APPLE_MLX_PREFIX="/absolute/path/to/mlx-prefix"
+```
+
+or
+
+```bash
+ln -s /absolute/path/to/mlx-prefix ../library/neuralnet/vendor/apple-mlx/.linked/mlx-prefix
+```
+
+If you are using a Homebrew MLX install, point to the prefix explicitly instead of relying on auto-discovery:
+
+```bash
+export APPLE_MLX_PREFIX="/opt/homebrew/opt/mlx"
 ```
 
 Once this is done, MLX should be then correctly bounded to the GPU cores (as opposed to the CPU)

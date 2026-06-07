@@ -26,8 +26,6 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 [[package]]
 name = "apple-mlx"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81ded5eafcb58126aad58da5bd7d599b327123db128822424aecb85a102f03ec"
 dependencies = [
  "bindgen",
  "cmake",

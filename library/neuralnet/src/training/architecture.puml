@@ -33,7 +33,14 @@ package "training" {
     + evaluated_samples: usize
     + correct_predictions: usize
     + unknown_predictions: usize
+    + skipped_samples: usize
     + accuracy: f64
+    + macro_precision: f64
+    + macro_recall: f64
+    + macro_f1: f64
+    + micro_precision: f64
+    + micro_recall: f64
+    + micro_f1: f64
   }
 
   class LabelQualityMetrics {
@@ -48,13 +55,21 @@ package "training" {
     + target: TrainerBridgeTarget
     + dendrite_type: DendriteType
     + early_stopping_patience: Option<usize>
+    + early_stopping_min_delta: f64
     + checkpoint_dir: Option<PathBuf>
+    + checkpoint_every_n_epochs: Option<usize>
+    + start_from_checkpoint_id: Option<String>
+    + save_best_checkpoint: bool
+    + save_last_checkpoint: bool
   }
 
   class EpochTrainingSummary {
     + epoch: usize
     + trained_examples: usize
+    + skipped_examples: usize
     + validation_accuracy: f64
+    + validation_macro_f1: f64
+    + validation_micro_f1: f64
   }
 
   class TrainingLoopReport {
@@ -62,6 +77,21 @@ package "training" {
     + best_epoch: Option<usize>
     + best_validation_accuracy: f64
     + history: Vec<EpochTrainingSummary>
+    + final_validation: Option<TrainerEvaluationReport>
+    + epoch_checkpoint_paths: BTreeMap<usize, Vec<PathBuf>>
+    + best_checkpoint_paths: Vec<PathBuf>
+    + last_checkpoint_paths: Vec<PathBuf>
+    + resumed_from_checkpoint: Option<String>
+  }
+
+  enum LinearOptimizer {
+    Sgd
+    Adam
+  }
+
+  enum OptimizerState {
+    Sgd
+    Adam
   }
 
   class DenseTokenBaseline {
@@ -75,9 +105,24 @@ package "training" {
     - input_dim: usize
     - output_dim: usize
     - learning_rate: f32
+    - optimizer: LinearOptimizer
+    - weight_decay: f32
+    - weight_optimizer_state: OptimizerState
+    - bias_optimizer_state: OptimizerState
     + new(input_dim: usize, output_dim: usize, learning_rate: f32): Result<LinearHead, LinearHeadError>
+    + dimensions(): (usize, usize)
+    + optimizer(): LinearOptimizer
+    + learning_rate(): f32
+    + set_optimizer(optimizer: LinearOptimizer)
+    + set_weight_decay(weight_decay: f32)
+    + configure_adam(beta1: f32, beta2: f32, epsilon: f32)
+    + logits(features: &[f32]): Result<Vec<f32>, LinearHeadError>
+    + probabilities(features: &[f32]): Result<Vec<f32>, LinearHeadError>
     + predict_class(features: &[f32]): Result<usize, LinearHeadError>
     + train_step(features: &[f32], target_class: usize): Result<f32, LinearHeadError>
+    + train_step_with_input_gradient(...): Result<(f32, Vec<f32>), LinearHeadError>
+    + train_batch(...): Result<f32, LinearHeadError>
+    + train_batch_with_input_gradients(...): Result<(f32, Vec<Vec<f32>>), LinearHeadError>
   }
 }
 
@@ -108,4 +153,6 @@ MultiModalBrain ..> TrainerBatchReport
 MultiModalBrain ..> TrainerEvaluationReport
 
 LinearHead ..> LinearHeadError
+LinearHead ..> LinearOptimizer
+LinearHead ..> OptimizerState
 @enduml

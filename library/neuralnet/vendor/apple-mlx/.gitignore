@@ -1,0 +1,4 @@
+.deps/
+.local/
+.linked/
+vendor/mlx-prefix/

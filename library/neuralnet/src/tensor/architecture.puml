@@ -26,9 +26,13 @@ package "tensor" {
   enum ImageTensorUtilityError
 
   interface TensorBackend {
-    + conv2d(...): Result<Tensor4D, TensorError>
-    + relu(input: &Tensor4D): Result<Tensor4D, TensorError>
+    + name(): &'static str
+    + conv2d_valid(...): Result<Tensor4D, TensorError>
     + max_pool2d(...): Result<Tensor4D, TensorError>
+    + global_average_pool2d(input: &Tensor4D): Result<Tensor4D, TensorError>
+    + relu_inplace(input: &mut Tensor4D)
+    + conv_relu_max_pool2d_valid(...): Result<Tensor4D, TensorError>
+    + conv_blocks_to_feature_vec(...): Result<Vec<f32>, TensorError>
   }
 
   class CpuTensorBackend
@@ -52,6 +56,10 @@ package "tensor" {
 
   class BackendSelector <<module>> {
     + active_backend(): &dyn TensorBackend
+    + active_backend_name(): &'static str
+    + active_backend_label(): &'static str
+    + cuda_backend_available(): bool
+    + mlx_backend_available(): bool
   }
 
   class Offloading <<module>>
@@ -80,6 +88,9 @@ ImageUtils ..> Image
 
 BackendSelector ..> TensorBackend
 BackendSelector ..> Offloading
+BackendSelector ..> CpuTensorBackend
+BackendSelector ..> CudaTensorBackend
+BackendSelector ..> MlxTensorBackend
 
 Offloading *-- CpuTensorBackend
 Offloading *-- CudaTensorBackend

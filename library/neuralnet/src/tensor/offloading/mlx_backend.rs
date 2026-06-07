@@ -201,6 +201,7 @@ fn mlx_conv_blocks_to_feature_vec(
     pool_stride_h: usize,
     pool_stride_w: usize,
 ) -> Result<Vec<f32>, TensorError> {
+
     #[cfg(feature = "offloading-mlx")]
     {
         mlx_conv_blocks_to_feature_vec_native(
@@ -234,6 +235,7 @@ fn mlx_conv_blocks_to_feature_vec(
         let gap = final_out.global_average_pool2d_cpu()?;
         Ok(gap.flatten_batch_features().first().cloned().unwrap_or_default())
     }
+
 }
 
 fn mlx_max_pool2d(
@@ -243,6 +245,7 @@ fn mlx_max_pool2d(
     stride_h: usize,
     stride_w: usize,
 ) -> Result<Tensor4D, TensorError> {
+
     #[cfg(feature = "offloading-mlx")]
     {
         mlx_max_pool2d_native(input, window_h, window_w, stride_h, stride_w)
@@ -252,9 +255,11 @@ fn mlx_max_pool2d(
     {
         input.max_pool2d_cpu(window_h, window_w, stride_h, stride_w)
     }
+
 }
 
 fn mlx_global_average_pool2d(input: &Tensor4D) -> Result<Tensor4D, TensorError> {
+
     #[cfg(feature = "offloading-mlx")]
     {
         mlx_global_average_pool2d_native(input)
@@ -264,9 +269,11 @@ fn mlx_global_average_pool2d(input: &Tensor4D) -> Result<Tensor4D, TensorError> 
     {
         input.global_average_pool2d_cpu()
     }
+
 }
 
 fn mlx_relu_inplace(input: &mut Tensor4D) {
+
     #[cfg(feature = "offloading-mlx")]
     {
         if let Ok(result) = mlx_relu_native(input) {
@@ -276,6 +283,7 @@ fn mlx_relu_inplace(input: &mut Tensor4D) {
     }
 
     input.relu_inplace_cpu()
+
 }
 
 #[cfg(feature = "offloading-mlx")]
@@ -324,7 +332,9 @@ fn mlx_array_from_tensor(tensor: &Tensor4D) -> raw::mlx_array {
 
 #[cfg(feature = "offloading-mlx")]
 fn mlx_array_to_tensor(array: raw::mlx_array, stream: raw::mlx_stream) -> Result<Tensor4D, TensorError> {
+
     unsafe {
+        
         mlx_check(raw::mlx_array_eval(array), "mlx_array_eval failed")?;
         mlx_check(raw::mlx_synchronize(stream), "mlx_synchronize failed")?;
 
@@ -354,7 +364,9 @@ fn mlx_array_to_tensor(array: raw::mlx_array, stream: raw::mlx_stream) -> Result
         let len = raw::mlx_array_size(array);
         let values = std::slice::from_raw_parts(data_ptr, len).to_vec();
         Tensor4D::from_vec(dims[0], dims[1], dims[2], dims[3], values)
+    
     }
+
 }
 
 #[cfg(feature = "offloading-mlx")]
@@ -876,11 +888,6 @@ fn mlx_conv_blocks_to_feature_vec_native(
         mlx_check(raw::mlx_synchronize(stream), "mlx_synchronize failed")?;
     }
 
-    let (n, c, _, _) = input_shape;
-    let _ = n;
-    let feature_len = c;
-    let (_, out_c, _, _) = if block2.is_some() { (0usize, 0usize, 0usize, 0usize) } else { (0, 0, 0, 0) };
-    let _ = out_c;
     let feature_len = unsafe { raw::mlx_array_size(gap_out) };
     let data_ptr = unsafe { raw::mlx_array_data_float32(gap_out) };
     let features = if data_ptr.is_null() || feature_len == 0 {

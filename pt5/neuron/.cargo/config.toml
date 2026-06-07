@@ -1,4 +1,2 @@
-[env]
-CMAKE_PREFIX_PATH = { value = ".local/apple-mlx", relative = true }
-MLX_DIR = { value = ".local/apple-mlx/share/cmake/MLX", relative = true }
-DYLD_LIBRARY_PATH = { value = ".local/apple-mlx/lib", relative = true }
+# MLX is bootstrapped from neuralnet/vendor/apple-mlx/.deps/mlx by default.
+# Keep this file empty unless you explicitly want to override that behavior.

@@ -1,0 +1,38 @@
+[package]
+name = "apple-mlx"
+version = "0.1.1"
+edition = "2024"
+description = "Rust bindings and safe wrappers for Apple MLX via the official mlx-c API"
+license = "MIT"
+readme = "README.md"
+documentation = "https://docs.rs/apple-mlx"
+homepage = "https://github.com/ms3c/apple-mlx"
+repository = "https://github.com/ms3c/apple-mlx"
+keywords = ["mlx", "apple", "ffi", "bindings", "metal"]
+categories = ["api-bindings"]
+include = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "README.md",
+    "Makefile",
+    "build.rs",
+    "scripts/**",
+    "src/**",
+    "examples/**",
+    "vendor/mlx-c/CMakeLists.txt",
+    "vendor/mlx-c/LICENSE",
+    "vendor/mlx-c/mlx-c.pc.in",
+    "vendor/mlx-c/mlx/**",
+]
+
+[features]
+docs-only = []
+
+[dependencies]
+
+[build-dependencies]
+bindgen = "0.71"
+cmake = "0.1"
+
+[package.metadata.docs.rs]
+features = ["docs-only"]

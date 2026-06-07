@@ -5,6 +5,7 @@ use crate::tensor::tensor4d::{Tensor4D, TensorError};
 pub struct CudaTensorBackend;
 
 impl TensorBackend for CudaTensorBackend {
+
     fn name(&self) -> &'static str {
         "cuda"
     }
@@ -38,6 +39,7 @@ impl TensorBackend for CudaTensorBackend {
     fn relu_inplace(&self, input: &mut Tensor4D) {
         cuda_relu_inplace_stub(input)
     }
+
 }
 
 pub fn cuda_backend() -> CudaTensorBackend {
@@ -55,9 +57,11 @@ fn cuda_conv2d_valid_stub(
     _stride_h: usize,
     _stride_w: usize,
 ) -> Result<Tensor4D, TensorError> {
+
     Err(TensorError::InvalidArgument(
         "cuda conv2d stub is not implemented yet",
     ))
+
 }
 
 fn cuda_max_pool2d_stub(
@@ -67,15 +71,19 @@ fn cuda_max_pool2d_stub(
     _stride_h: usize,
     _stride_w: usize,
 ) -> Result<Tensor4D, TensorError> {
+
     Err(TensorError::InvalidArgument(
         "cuda max_pool2d stub is not implemented yet",
     ))
+
 }
 
 fn cuda_global_average_pool2d_stub(_input: &Tensor4D) -> Result<Tensor4D, TensorError> {
+
     Err(TensorError::InvalidArgument(
         "cuda global_average_pool2d stub is not implemented yet",
     ))
+    
 }
 
 fn cuda_relu_inplace_stub(_input: &mut Tensor4D) {}

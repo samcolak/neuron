@@ -10,14 +10,20 @@ title neuralnet/src/cnn class structure
 package "cnn" {
   enum CnnImageClassifierError {
     InvalidConfiguration
-    TensorFailure
-    SnapshotFailure
+    UnsupportedImageShape
+    InputChannelMismatch
+    UnknownLabel
+    GradientShapeMismatch
+    GradientTensorShapeMismatch
+    TensorAdapter
+    Tensor
+    LinearHead
   }
 
   enum CnnFeatureExtractorError {
     UnsupportedImageShape
-    TensorFailure
-    InvalidConfiguration
+    TensorAdapter
+    Tensor
   }
 
   class CnnImageClassifier {
@@ -25,46 +31,96 @@ package "cnn" {
     - input_width: usize
     - input_channels: usize
     - class_labels: Vec<String>
+    - label_to_index: BTreeMap<String, usize>
+    - conv1_kernels: Tensor4D
+    - conv1_bias: Vec<f32>
+    - conv2_kernels: Option<Tensor4D>
+    - conv2_bias: Option<Vec<f32>>
+    - feature_learning_rate: f32
+    - head: LinearHead
     - min_confidence: f32
     + new(...): Result<CnnImageClassifier, CnnImageClassifierError>
-    + train_image(label: &str, image: &[u8]): Result<(), CnnImageClassifierError>
+    + new_two_layer(...): Result<CnnImageClassifier, CnnImageClassifierError>
+    + new_with_feature_channels(...): Result<CnnImageClassifier, CnnImageClassifierError>
+    + new_with_feature_channels_and_input_channels(...): Result<CnnImageClassifier, CnnImageClassifierError>
+    + class_labels(): &[String]
+    + set_min_confidence(min_confidence: f32)
+    + min_confidence(): f32
+    + set_head_optimizer(optimizer: LinearOptimizer)
+    + head_optimizer(): LinearOptimizer
+    + head_learning_rate(): f32
+    + set_head_weight_decay(weight_decay: f32)
+    + configure_head_adam(beta1: f32, beta2: f32, epsilon: f32)
+    + extract_features(image: &[u8]): Result<Vec<f32>, CnnImageClassifierError>
+    + train_image(label: &str, image: &[u8]): Result<f32, CnnImageClassifierError>
+    + train_image_batch(...): Result<f32, CnnImageClassifierError>
     + predict_with_confidence(image: &[u8]): Result<Option<(String, f32)>, CnnImageClassifierError>
-    + train_labeled_image_batches(batches: &[CnnTrainerBatch]): TrainerBatchReport
-    + evaluate_labeled_images(samples: &[CnnEvaluationSample]): TrainerEvaluationReport
+    + save_to_file(path: &Path): io::Result<()>
+    + load_from_file(path: &Path): io::Result<CnnImageClassifier>
   }
 
   class CnnFeatureExtractor {
-    - target_height: usize
-    - target_width: usize
-    + new(target_height: usize, target_width: usize): CnnFeatureExtractor
+    - input_height: usize
+    - input_width: usize
+    - kernels: Tensor4D
+    - bias: Vec<f32>
+    + new(input_height: usize, input_width: usize): CnnFeatureExtractor
     + extract_feature_tokens(image: &[u8]): Result<Vec<String>, CnnFeatureExtractorError>
   }
 
-  class CnnTrainerBatch {
-    + label: String
-    + samples: Vec<Vec<u8>>
-    + new(label: &str, samples: Vec<Vec<u8>>): CnnTrainerBatch
+  enum PipelineMode {
+    Train
+    Evaluation
   }
 
-  class CnnEvaluationSample {
-    + expected_label: String
+  enum ImageTransform
+
+  class ImageTransformPipeline {
+    + new(transforms: Vec<ImageTransform>): ImageTransformPipeline
+    + transforms(): &[ImageTransform]
+    + apply(image_bytes: &[u8], rng: &mut TransformRng, mode: PipelineMode): Vec<u8>
+  }
+
+  class LabeledImageRecord {
+    + label: String
     + image: Vec<u8>
-    + new(expected_label: &str, image: Vec<u8>): CnnEvaluationSample
+    + new(label: &str, image: Vec<u8>): LabeledImageRecord
+  }
+
+  class CnnDataBatch {
+    + label: String
+    + images: Vec<Vec<u8>>
+  }
+
+  class CnnDataLoaderOptions
+
+  class CnnDataLoader {
+    + new(records: Vec<LabeledImageRecord>, options: CnnDataLoaderOptions): CnnDataLoader
+    + from_samples(samples: &[(String, Vec<u8>)], options: CnnDataLoaderOptions): CnnDataLoader
+    + options(): &CnnDataLoaderOptions
+    + len(): usize
+    + is_empty(): bool
+    + epoch_batches(epoch: u64): Vec<CnnDataBatch>
+    + epoch_as_label_batches(epoch: u64): Vec<CnnTrainerBatch>
   }
 }
 
 class Tensor4D <<external>>
 class LinearHead <<external>>
-class TrainerBatchReport <<external>>
-class TrainerEvaluationReport <<external>>
+class LinearOptimizer <<external>>
+class TransformRng <<external>>
+class CnnTrainerBatch <<external>>
 
 CnnImageClassifier ..> CnnImageClassifierError
 CnnFeatureExtractor ..> CnnFeatureExtractorError
 
 CnnImageClassifier ..> Tensor4D
 CnnImageClassifier ..> LinearHead
-CnnImageClassifier ..> CnnTrainerBatch
-CnnImageClassifier ..> CnnEvaluationSample
-CnnImageClassifier ..> TrainerBatchReport
-CnnImageClassifier ..> TrainerEvaluationReport
+CnnImageClassifier ..> LinearOptimizer
+ImageTransformPipeline ..> PipelineMode
+ImageTransformPipeline ..> TransformRng
+CnnDataLoader ..> LabeledImageRecord
+CnnDataLoader ..> CnnDataLoaderOptions
+CnnDataLoader ..> CnnDataBatch
+CnnDataLoader ..> CnnTrainerBatch
 @enduml

@@ -17,7 +17,9 @@
       "cargo check": true,
       "cargo test": true,
       "cargo info": true,
-      "git ls-remote": true
+      "git ls-remote": true,
+      "cargo clean": true,
+      "env": true
     }
   }
 }
