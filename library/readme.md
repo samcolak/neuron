@@ -3,7 +3,9 @@
 
 Built without any dependancies on existing Neural Network foundation models or libraries via 3rd parties
 Do not use this (YET) in operational code - alot of changes forthcoming (and optimizations)
-This is not intented for production environments (YET)
+
+This is not intented for production environments (YET).
+
 Distributed under GPL-3.0 License - Please observe the license (in the root) - All derived works MUST remain open source for the community
 
 NB. Whilst i am not a qualified / certified mathematician, alot of work on Tensors uses mathematical models etc - If you find an error, please inform me asap !! Many thanks
