@@ -172,6 +172,7 @@ impl Tensor4D {
         stride_h: usize,
         stride_w: usize,
     ) -> Result<Self, TensorError> {
+
         if stride_h == 0 || stride_w == 0 {
             return Err(TensorError::InvalidArgument("stride must be greater than zero"));
         }
@@ -208,6 +209,9 @@ impl Tensor4D {
         let out_w = ((self.w - kernels.w) / stride_w) + 1;
         let mut output = Tensor4D::zeros(self.n, kernels.n, out_h, out_w);
 
+        // For each output element, compute the convolution sum over the corresponding input patch and kernel weights.
+        // oh this is such a nightmare to write and read but it should be correct and efficient enough for small tensors
+
         for batch in 0..self.n {
             for out_c in 0..kernels.n {
                 let bias_value = bias.and_then(|b| b.get(out_c)).copied().unwrap_or(0.0);
@@ -232,6 +236,7 @@ impl Tensor4D {
         }
 
         Ok(output)
+
     }
 
     pub fn max_pool2d(

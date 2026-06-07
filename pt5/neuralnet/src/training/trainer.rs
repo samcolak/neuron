@@ -218,6 +218,7 @@ fn increment_confusion_count(
 }
 
 fn compute_quality_metrics(report: &mut TrainerEvaluationReport) {
+
     let mut labels: BTreeSet<String> = BTreeSet::new();
 
     labels.extend(report.per_label_total.keys().cloned());
@@ -241,6 +242,7 @@ fn compute_quality_metrics(report: &mut TrainerEvaluationReport) {
     let mut fn_total: usize = 0;
 
     for label in labels {
+
         let tp = report
             .confusion_matrix
             .get(&label)
@@ -302,6 +304,7 @@ fn compute_quality_metrics(report: &mut TrainerEvaluationReport) {
         tp_total += tp;
         fp_total += fp;
         fn_total += fn_count;
+
     }
 
     let label_count = report.per_label_metrics.len() as f64;
@@ -329,6 +332,7 @@ fn compute_quality_metrics(report: &mut TrainerEvaluationReport) {
     } else {
         0.0
     };
+    
 }
 
 #[cfg(test)]

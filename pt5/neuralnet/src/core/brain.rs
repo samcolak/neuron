@@ -922,4 +922,5 @@ mod tests {
         assert!(loaded_b.enumerate_text_path("alpha signal").0.is_none());
         cleanup_snapshot_test_dir(test_name);
     }
+    
 }

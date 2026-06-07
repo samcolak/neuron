@@ -58,6 +58,7 @@ impl Default for CnnFeatureExtractor {
 }
 
 impl CnnFeatureExtractor {
+
     pub fn new(input_height: usize, input_width: usize) -> Self {
         let kernels = Tensor4D::from_vec(
             2,
@@ -87,7 +88,7 @@ impl CnnFeatureExtractor {
         &self,
         image_bytes: &[u8],
     ) -> Result<Vec<String>, CnnFeatureExtractorError> {
-        
+
         let (in_height, in_width) = infer_square_dimensions(image_bytes).ok_or(
             CnnFeatureExtractorError::UnsupportedImageShape {
                 byte_len: image_bytes.len(),
@@ -119,11 +120,13 @@ impl CnnFeatureExtractor {
         tokens.push(format!("g{}", mean_bucket.min(30)));
 
         Ok(tokens)
+
     }
 
 }
 
 fn infer_square_dimensions(image_bytes: &[u8]) -> Option<(usize, usize)> {
+
     if image_bytes.is_empty() {
         return None;
     }
@@ -136,9 +139,11 @@ fn infer_square_dimensions(image_bytes: &[u8]) -> Option<(usize, usize)> {
     } else {
         None
     }
+
 }
 
 fn quantize_channels(pooled: &Tensor4D) -> Result<Vec<String>, TensorError> {
+
     let (_, channels, height, width) = pooled.shape();
     let mut tokens = Vec::with_capacity(channels.saturating_mul(4));
 
@@ -166,7 +171,9 @@ fn quantize_channels(pooled: &Tensor4D) -> Result<Vec<String>, TensorError> {
     }
 
     Ok(tokens)
+
 }
+
 
 #[cfg(test)]
 mod tests {

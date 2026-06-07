@@ -23,6 +23,7 @@ pub struct DenseTokenBaseline {
 }
 
 impl DenseTokenBaseline {
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -62,10 +63,13 @@ impl DenseTokenBaseline {
         } else {
             best_label
         }
+    
     }
+
 }
 
 impl TrainableModel for DenseTokenBaseline {
+
     fn train_epoch(
         &mut self,
         samples: &[SupervisedSample],
@@ -73,6 +77,7 @@ impl TrainableModel for DenseTokenBaseline {
         _target: TrainerBridgeTarget,
         _dendrite_type: DendriteType,
     ) -> TrainerBatchReport {
+
         let controller = MultiModalController;
         let mut report = TrainerBatchReport::default();
 
@@ -101,12 +106,15 @@ impl TrainableModel for DenseTokenBaseline {
 
             report.trained_examples += 1;
             *report.per_label_counts.entry(label).or_insert(0) += 1;
+
         }
 
         report
+
     }
 
     fn evaluate_dataset(&self, samples: &[SupervisedSample]) -> TrainerEvaluationReport {
+
         let mut report = TrainerEvaluationReport {
             total_samples: samples.len(),
             ..TrainerEvaluationReport::default()
@@ -148,6 +156,7 @@ impl TrainableModel for DenseTokenBaseline {
 
         compute_quality_metrics(&mut report);
         report
+
     }
 
     fn save_checkpoint(&self, checkpoint_id: &str, dir: &Path) -> io::Result<Vec<PathBuf>> {
@@ -280,6 +289,7 @@ fn compute_quality_metrics(report: &mut TrainerEvaluationReport) {
         tp_total += tp;
         fp_total += fp;
         fn_total += fn_count;
+
     }
 
     let label_count = report.per_label_metrics.len() as f64;
@@ -307,6 +317,7 @@ fn compute_quality_metrics(report: &mut TrainerEvaluationReport) {
     } else {
         0.0
     };
+    
 }
 
 #[cfg(test)]
