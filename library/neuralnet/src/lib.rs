@@ -8,6 +8,7 @@
     The library is organized into several modules:
 
     - `core`:       Contains the core components of the neural network, including the main brain structure, model definitions, and training logic.
+    - `cnn`:        Contains components specific to convolutional neural networks (CNNs), including feature extractors, classifiers, and CNN trainers.
     - `training`:   Contains the training loop implementation and related utilities for training neural networks.
     - `dendrites`:  Contains definitions for different types of dendrites used in the neural network.
     - `helpers`:    Contains helper functions and utilities for working with multimodal data and other common tasks.
@@ -19,6 +20,7 @@
 */
 
 pub mod core;
+pub mod cnn;
 pub mod training;
 pub mod dendrites;
 pub mod helpers;

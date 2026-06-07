@@ -1,7 +1,10 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-use crate::tensor::adapters::{image_bytes_to_tensor_nchw_resized, TensorAdapterError};
+use crate::tensor::adapters::{
+    image_bytes_to_tensor_nchw_resized_with_channels,
+    TensorAdapterError,
+};
 use crate::tensor::tensor4d::{Tensor4D, TensorError};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -27,7 +30,7 @@ impl Display for CnnFeatureExtractorError {
             Self::UnsupportedImageShape { byte_len } => {
                 write!(
                     f,
-                    "unsupported image shape for CNN extractor (expected square grayscale bytes): {} bytes",
+                    "unsupported image shape for CNN extractor (expected square bytes with 1, 3, or 4 channels): {} bytes",
                     byte_len
                 )
             }
@@ -89,33 +92,40 @@ impl CnnFeatureExtractor {
         image_bytes: &[u8],
     ) -> Result<Vec<String>, CnnFeatureExtractorError> {
 
-        let (in_height, in_width) = infer_square_dimensions(image_bytes).ok_or(
+        let (in_height, in_width, in_channels) = infer_square_dimensions_and_channels(image_bytes).ok_or(
             CnnFeatureExtractorError::UnsupportedImageShape {
                 byte_len: image_bytes.len(),
             },
         )?;
 
-        let input = image_bytes_to_tensor_nchw_resized(
+        let input = image_bytes_to_tensor_nchw_resized_with_channels(
             image_bytes,
             in_height,
             in_width,
+            in_channels,
             self.input_height,
             self.input_width,
             true,
         )?;
 
+        let input = if in_channels == 1 {
+            input
+        } else {
+            collapse_to_single_channel(&input)?
+        };
+
         let mut features = input.conv2d_valid(&self.kernels, Some(self.bias.as_slice()), 1, 1)?;
-        features.map_inplace(|value| value.max(0.0));
+        features.relu_inplace();
 
         let pooled = features.max_pool2d(2, 2, 2, 2)?;
         let mut tokens = quantize_channels(&pooled)?;
 
-        let mean_activation = if pooled.is_empty() {
+        let global_pooled = pooled.global_average_pool2d()?;
+        let mean_activation = if global_pooled.is_empty() {
             0.0
         } else {
-            pooled.as_slice().iter().sum::<f32>() / pooled.len() as f32
+            global_pooled.as_slice().iter().sum::<f32>() / global_pooled.len() as f32
         };
-
         let mean_bucket = (mean_activation.clamp(0.0, 3.0) * 10.0) as usize;
         tokens.push(format!("g{}", mean_bucket.min(30)));
 
@@ -125,21 +135,48 @@ impl CnnFeatureExtractor {
 
 }
 
-fn infer_square_dimensions(image_bytes: &[u8]) -> Option<(usize, usize)> {
+fn infer_square_dimensions_and_channels(image_bytes: &[u8]) -> Option<(usize, usize, usize)> {
 
     if image_bytes.is_empty() {
         return None;
     }
 
     let len = image_bytes.len();
-    let side = (len as f64).sqrt() as usize;
 
-    if side.saturating_mul(side) == len {
-        Some((side, side))
-    } else {
-        None
+    for channels in [1usize, 3usize, 4usize] {
+        if len % channels != 0 {
+            continue;
+        }
+
+        let pixels = len / channels;
+        let side = (pixels as f64).sqrt() as usize;
+
+        if side.saturating_mul(side) == pixels {
+            return Some((side, side, channels));
+        }
     }
 
+    None
+
+}
+
+fn collapse_to_single_channel(input: &Tensor4D) -> Result<Tensor4D, TensorError> {
+    let (n, c, h, w) = input.shape();
+    let mut collapsed = Tensor4D::zeros(n, 1, h, w);
+
+    for batch in 0..n {
+        for y in 0..h {
+            for x in 0..w {
+                let mut sum = 0.0f32;
+                for channel in 0..c {
+                    sum += input.get(batch, channel, y, x)?;
+                }
+                collapsed.set(batch, 0, y, x, sum / c as f32)?;
+            }
+        }
+    }
+
+    Ok(collapsed)
 }
 
 fn quantize_channels(pooled: &Tensor4D) -> Result<Vec<String>, TensorError> {
@@ -203,5 +240,21 @@ mod tests {
             result,
             Err(CnnFeatureExtractorError::UnsupportedImageShape { byte_len: 1000 })
         ));
+    }
+
+    #[test]
+    fn extractor_accepts_rgb_square_image_bytes() {
+        let extractor = CnnFeatureExtractor::new(16, 16);
+        let grayscale = vec![32u8; 64];
+        let rgb: Vec<u8> = grayscale
+            .iter()
+            .flat_map(|value| [*value, *value, *value])
+            .collect();
+
+        let tokens = extractor
+            .extract_feature_tokens(rgb.as_slice())
+            .unwrap_or_else(|_| panic!("extractor should produce tokens for rgb square image"));
+
+        assert!(!tokens.is_empty());
     }
 }

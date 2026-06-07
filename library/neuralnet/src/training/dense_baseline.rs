@@ -1,16 +1,12 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::core::model::{SupervisedSample, TrainableModel};
 use crate::core::nodenet::{NodeMetadata, NodeNetworkController};
-use crate::training::trainer::{
-    LabelQualityMetrics,
-    TrainerBatchReport,
-    TrainerBridgeTarget,
-    TrainerEvaluationReport,
-};
+use crate::training::metrics::{compute_quality_metrics, increment_confusion_count};
+use crate::training::trainer::{TrainerBatchReport, TrainerBridgeTarget, TrainerEvaluationReport};
 use crate::dendrites::text_dendrite::DendriteType;
 use crate::helpers::multimodal_controller::MultiModalController;
 
@@ -134,14 +130,14 @@ impl TrainableModel for DenseTokenBaseline {
                 Some(predicted) if predicted == expected => {
                     report.correct_predictions += 1;
                     *report.per_label_correct.entry(expected.clone()).or_insert(0) += 1;
-                    increment_confusion(&mut report.confusion_matrix, expected, predicted);
+                    increment_confusion_count(&mut report.confusion_matrix, expected, predicted);
                 }
                 Some(predicted) => {
-                    increment_confusion(&mut report.confusion_matrix, expected, predicted);
+                    increment_confusion_count(&mut report.confusion_matrix, expected, predicted);
                 }
                 None => {
                     report.unknown_predictions += 1;
-                    increment_confusion(
+                    increment_confusion_count(
                         &mut report.confusion_matrix,
                         expected,
                         "<unknown>".to_string(),
@@ -192,132 +188,6 @@ impl TrainableModel for DenseTokenBaseline {
         *self = decoded;
         Ok(())
     }
-}
-
-fn increment_confusion(
-    matrix: &mut BTreeMap<String, BTreeMap<String, usize>>,
-    expected: String,
-    predicted: String,
-) {
-    *matrix
-        .entry(expected)
-        .or_default()
-        .entry(predicted)
-        .or_insert(0) += 1;
-}
-
-fn compute_quality_metrics(report: &mut TrainerEvaluationReport) {
-    let mut labels: BTreeSet<String> = BTreeSet::new();
-
-    labels.extend(report.per_label_total.keys().cloned());
-    for row in report.confusion_matrix.values() {
-        for predicted in row.keys() {
-            if predicted != "<unknown>" {
-                labels.insert(predicted.clone());
-            }
-        }
-    }
-
-    if labels.is_empty() {
-        return;
-    }
-
-    let mut precision_sum = 0.0;
-    let mut recall_sum = 0.0;
-    let mut f1_sum = 0.0;
-    let mut tp_total: usize = 0;
-    let mut fp_total: usize = 0;
-    let mut fn_total: usize = 0;
-
-    for label in labels {
-        let tp = report
-            .confusion_matrix
-            .get(&label)
-            .and_then(|r| r.get(&label))
-            .copied()
-            .unwrap_or(0);
-
-        let fp = report
-            .confusion_matrix
-            .iter()
-            .filter(|(expected, _)| *expected != &label)
-            .map(|(_, row)| row.get(&label).copied().unwrap_or(0))
-            .sum::<usize>();
-
-        let fn_count = report
-            .confusion_matrix
-            .get(&label)
-            .map(|row| {
-                row.iter()
-                    .filter(|(predicted, _)| *predicted != &label)
-                    .map(|(_, count)| *count)
-                    .sum::<usize>()
-            })
-            .unwrap_or(0);
-
-        let precision = if tp + fp > 0 {
-            tp as f64 / (tp + fp) as f64
-        } else {
-            0.0
-        };
-        let recall = if tp + fn_count > 0 {
-            tp as f64 / (tp + fn_count) as f64
-        } else {
-            0.0
-        };
-        let f1 = if (precision + recall) > 0.0 {
-            2.0 * precision * recall / (precision + recall)
-        } else {
-            0.0
-        };
-
-        let support = report.per_label_total.get(&label).copied().unwrap_or(0);
-
-        report.per_label_metrics.insert(
-            label,
-            LabelQualityMetrics {
-                precision,
-                recall,
-                f1,
-                support,
-            },
-        );
-
-        precision_sum += precision;
-        recall_sum += recall;
-        f1_sum += f1;
-        tp_total += tp;
-        fp_total += fp;
-        fn_total += fn_count;
-
-    }
-
-    let label_count = report.per_label_metrics.len() as f64;
-    if label_count > 0.0 {
-        report.macro_precision = precision_sum / label_count;
-        report.macro_recall = recall_sum / label_count;
-        report.macro_f1 = f1_sum / label_count;
-    }
-
-    report.micro_precision = if tp_total + fp_total > 0 {
-        tp_total as f64 / (tp_total + fp_total) as f64
-    } else {
-        0.0
-    };
-
-    report.micro_recall = if tp_total + fn_total > 0 {
-        tp_total as f64 / (tp_total + fn_total) as f64
-    } else {
-        0.0
-    };
-
-    report.micro_f1 = if (report.micro_precision + report.micro_recall) > 0.0 {
-        2.0 * report.micro_precision * report.micro_recall
-            / (report.micro_precision + report.micro_recall)
-    } else {
-        0.0
-    };
-    
 }
 
 #[cfg(test)]

@@ -1,7 +1,15 @@
 
-# Pt.5 Learning
+# Neural Network (RUST) Library
 
-This phase adds CNN-ready tensor tooling and wires it into both the `neuralnet` library and the `neuron` app walkthrough.
+Built without any dependancies on existing Neural Network foundation models or libraries via 3rd parties
+Do not use this (YET) in operational code - alot of changes forthcoming (and optimizations)
+This is not intented for production environments (YET)
+Distributed under GPL-3.0 License - Please observe the license (in the root) - All derived works MUST remain open source for the community
+
+NB. Whilst i am not a qualified / certified mathematician, alot of work on Tensors uses mathematical models etc - If you find an error, please inform me asap !! Many thanks
+
+Written by Samuel Colak (sam@samcolak.com)
+
 
 ## What Changed
 
@@ -14,28 +22,30 @@ This phase adds CNN-ready tensor tooling and wires it into both the `neuralnet` 
 
 ## Project Layout
 
-- `neuralnet/`: core library (brain, training, tensors, integration tests)
-- `neuron/`: runnable app walkthrough and demo harness
+- `/library/neuralnet/`: core library (brain, training, tensors, integration tests)
+- `/pt5/neuron/`: runnable app walkthrough and demo harness
+
+Parts 1-4 are evolutions in the library... This is intended as the primary stable instance
 
 ## Run And Test
 
 From the repository root (`pt5`):
 
 ```bash
-cd neuralnet && cargo test
+cd /library/neuralnet && cargo test
 ```
 
 ```bash
-cd neuron && cargo test
+cd /pt5/neuron && cargo test
 ```
 
 ```bash
-cd neuron && cargo run --quiet
+cd /pt5/neuron && cargo run --quiet
 ```
 
 ## App Walkthrough (Trainer)
 
-The trainer walkthrough is in `neuron/src/trainer_walkthrough.rs` and now includes six steps.
+The trainer walkthrough is in `/pt5/neuron/src/trainer_walkthrough.rs` and now includes six steps.
 
 - Step 1: single labeled training sample
 - Step 2: batch training
@@ -46,7 +56,7 @@ The trainer walkthrough is in `neuron/src/trainer_walkthrough.rs` and now includ
 
 ## App Walkthrough (Standalone CNN Classifier)
 
-The standalone trainable image-classifier walkthrough is in `neuron/src/cnn_classifier_walkthrough.rs`.
+The standalone trainable image-classifier walkthrough is in `/pt5/neuron/src/cnn_classifier_walkthrough.rs`.
 
 It validates:
 
@@ -116,18 +126,18 @@ Expected validation signals:
 
 ## Key Files
 
-- `neuralnet/src/tensor/tensor4d.rs`: tensor structure + `conv2d_valid` + `max_pool2d`
-- `neuralnet/src/cnn/feature_extractor.rs`: CNN feature extraction for images
-- `neuralnet/src/cnn/classifier.rs`: trainable CNN image classifier backed by `LinearHead`, including save/load snapshot lifecycle and optional two-layer conv backbone (`new_two_layer`)
-- `neuralnet/src/core/brain.rs`: optional classifier preprocessing hook for image CNN path
-- `neuralnet/src/cnn/cnn_trainer.rs`: image trainer adapter that emits standard training reports/metrics
-- `neuralnet/src/training/trainer.rs`: training/evaluation + confusion matrix + macro/micro metrics
-- `neuralnet/src/core/integration.rs`: supervised pipeline + integration tests
-- `neuron/src/trainer_fixtures.rs`: app walkthrough fixtures, including CNN image samples
-- `neuron/src/trainer_walkthrough.rs`: app-side walkthrough and CNN step
-- `neuron/src/cnn_classifier_walkthrough.rs`: dedicated standalone CNN classifier walkthrough
+- `/library/neuralnet/src/tensor/tensor4d.rs`: tensor structure + `conv2d_valid` + `max_pool2d`
+- `/library/neuralnet/src/cnn/feature_extractor.rs`: CNN feature extraction for images
+- `/library/neuralnet/src/cnn/classifier.rs`: trainable CNN image classifier backed by `LinearHead`, including save/load snapshot lifecycle and optional two-layer conv backbone (`new_two_layer`)
+- `/library/neuralnet/src/core/brain.rs`: optional classifier preprocessing hook for image CNN path
+- `/library/neuralnet/src/cnn/cnn_trainer.rs`: image trainer adapter that emits standard training reports/metrics
+- `/library/neuralnet/src/training/trainer.rs`: training/evaluation + confusion matrix + macro/micro metrics
+- `/library/neuralnet/src/core/integration.rs`: supervised pipeline + integration tests
+- `/library/neuron/src/trainer_fixtures.rs`: app walkthrough fixtures, including CNN image samples
+- `/library/neuron/src/trainer_walkthrough.rs`: app-side walkthrough and CNN step
+- `/library/neuron/src/cnn_classifier_walkthrough.rs`: dedicated standalone CNN classifier walkthrough
 
 ## Current Baseline
 
-- `neuralnet`: all tests passing
-- `neuron`: all tests passing
+- `/library/neuralnet`: all tests passing
+- `/pt5/neuron`: all tests passing

@@ -9,6 +9,7 @@
 #![allow(clippy::clone_on_ref_ptr, reason = "")]
 
 mod multimodal_demo;
+mod cnn_classifier_walkthrough;
 mod trainer_fixtures;
 mod trainer_presentation;
 mod trainer_walkthrough;
@@ -17,4 +18,5 @@ fn main() {
     println!("Multimodal brain demo");
     multimodal_demo::run_multimodal_demo();
     trainer_walkthrough::run_trainer_walkthrough();
+    cnn_classifier_walkthrough::run_cnn_classifier_walkthrough();
 }

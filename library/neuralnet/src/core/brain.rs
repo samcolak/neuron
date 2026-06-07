@@ -4,7 +4,7 @@ use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 
-use crate::core::cnn_feature_extractor::CnnFeatureExtractor;
+use crate::cnn::feature_extractor::CnnFeatureExtractor;
 use crate::core::nodenet::{NodeMetadata, NodeNetwork};
 use crate::helpers::image_io::{ImageIoError, load_png_or_jpeg_from_path};
 use crate::helpers::multimodal_controller::MultiModalInput;

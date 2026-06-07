@@ -1,5 +1,8 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use serde::{Deserialize, Serialize};
+
+use crate::tensor::backend::{active_backend, TensorBackend};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TensorError {
@@ -51,7 +54,7 @@ impl Display for TensorError {
 
 impl Error for TensorError {}
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Tensor4D {
     data: Vec<f32>,
     n: usize,
@@ -119,6 +122,22 @@ impl Tensor4D {
         self.data.as_mut_slice()
     }
 
+    pub fn flatten_batch_features(&self) -> Vec<Vec<f32>> {
+        if self.n == 0 {
+            return Vec::new();
+        }
+
+        let per_sample = self.c.saturating_mul(self.h).saturating_mul(self.w);
+        if per_sample == 0 {
+            return vec![Vec::new(); self.n];
+        }
+
+        self.data
+            .chunks_exact(per_sample)
+            .map(|chunk| chunk.to_vec())
+            .collect()
+    }
+
     pub fn get(&self, n: usize, c: usize, h: usize, w: usize) -> Result<f32, TensorError> {
         let idx = self.offset(n, c, h, w)?;
         Ok(self.data[idx])
@@ -150,6 +169,14 @@ impl Tensor4D {
         }
     }
 
+    pub fn relu_inplace(&mut self) {
+        self.relu_inplace_with_backend(active_backend());
+    }
+
+    pub(crate) fn relu_inplace_cpu(&mut self) {
+        self.map_inplace(|value| value.max(0.0));
+    }
+
     pub fn add_inplace(&mut self, other: &Self) -> Result<(), TensorError> {
         if self.shape() != other.shape() {
             return Err(TensorError::IncompatibleShapes {
@@ -166,6 +193,16 @@ impl Tensor4D {
     }
 
     pub fn conv2d_valid(
+        &self,
+        kernels: &Self,
+        bias: Option<&[f32]>,
+        stride_h: usize,
+        stride_w: usize,
+    ) -> Result<Self, TensorError> {
+        self.conv2d_valid_with_backend(active_backend(), kernels, bias, stride_h, stride_w)
+    }
+
+    pub(crate) fn conv2d_valid_cpu(
         &self,
         kernels: &Self,
         bias: Option<&[f32]>,
@@ -209,8 +246,7 @@ impl Tensor4D {
         let out_w = ((self.w - kernels.w) / stride_w) + 1;
         let mut output = Tensor4D::zeros(self.n, kernels.n, out_h, out_w);
 
-        // For each output element, compute the convolution sum over the corresponding input patch and kernel weights.
-        // oh this is such a nightmare to write and read but it should be correct and efficient enough for small tensors
+        // For each output position, accumulate input patch * kernel weights across channels.
 
         for batch in 0..self.n {
             for out_c in 0..kernels.n {
@@ -239,7 +275,28 @@ impl Tensor4D {
 
     }
 
+    pub fn conv2d_valid_with_backend<B: TensorBackend + ?Sized>(
+        &self,
+        backend: &B,
+        kernels: &Self,
+        bias: Option<&[f32]>,
+        stride_h: usize,
+        stride_w: usize,
+    ) -> Result<Self, TensorError> {
+        backend.conv2d_valid(self, kernels, bias, stride_h, stride_w)
+    }
+
     pub fn max_pool2d(
+        &self,
+        window_h: usize,
+        window_w: usize,
+        stride_h: usize,
+        stride_w: usize,
+    ) -> Result<Self, TensorError> {
+        self.max_pool2d_with_backend(active_backend(), window_h, window_w, stride_h, stride_w)
+    }
+
+    pub(crate) fn max_pool2d_cpu(
         &self,
         window_h: usize,
         window_w: usize,
@@ -288,6 +345,59 @@ impl Tensor4D {
         Ok(output)
     }
 
+    pub fn max_pool2d_with_backend<B: TensorBackend + ?Sized>(
+        &self,
+        backend: &B,
+        window_h: usize,
+        window_w: usize,
+        stride_h: usize,
+        stride_w: usize,
+    ) -> Result<Self, TensorError> {
+        backend.max_pool2d(self, window_h, window_w, stride_h, stride_w)
+    }
+
+    pub fn global_average_pool2d(&self) -> Result<Self, TensorError> {
+        self.global_average_pool2d_with_backend(active_backend())
+    }
+
+    pub(crate) fn global_average_pool2d_cpu(&self) -> Result<Self, TensorError> {
+        if self.h == 0 || self.w == 0 {
+            return Err(TensorError::InvalidArgument(
+                "global average pooling requires non-zero spatial dimensions",
+            ));
+        }
+
+        let mut output = Tensor4D::zeros(self.n, self.c, 1, 1);
+
+        for batch in 0..self.n {
+            for channel in 0..self.c {
+                let mut sum = 0.0f32;
+
+                for y in 0..self.h {
+                    for x in 0..self.w {
+                        sum += self.get(batch, channel, y, x)?;
+                    }
+                }
+
+                let denom = (self.h * self.w) as f32;
+                output.set(batch, channel, 0, 0, sum / denom)?;
+            }
+        }
+
+        Ok(output)
+    }
+
+    pub fn global_average_pool2d_with_backend<B: TensorBackend + ?Sized>(
+        &self,
+        backend: &B,
+    ) -> Result<Self, TensorError> {
+        backend.global_average_pool2d(self)
+    }
+
+    pub fn relu_inplace_with_backend<B: TensorBackend + ?Sized>(&mut self, backend: &B) {
+        backend.relu_inplace(self)
+    }
+
     fn offset(&self, n: usize, c: usize, h: usize, w: usize) -> Result<usize, TensorError> {
         if n >= self.n || c >= self.c || h >= self.h || w >= self.w {
             return Err(TensorError::OutOfBounds { n, c, h, w });
@@ -300,6 +410,7 @@ impl Tensor4D {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tensor::backend::cpu_backend;
 
     #[test]
     fn tensor4d_round_trip_get_set() {
@@ -416,5 +527,98 @@ mod tests {
                 "pooling window must be greater than zero"
             ))
         ));
+    }
+
+    #[test]
+    fn tensor4d_relu_inplace_clamps_negative_values() {
+        let mut tensor = Tensor4D::from_vec(1, 1, 2, 2, vec![-2.0, -0.1, 0.0, 3.5])
+            .unwrap_or_else(|_| panic!("tensor should be valid"));
+
+        tensor.relu_inplace();
+
+        assert_eq!(tensor.as_slice(), &[0.0, 0.0, 0.0, 3.5]);
+    }
+
+    #[test]
+    fn tensor4d_global_average_pool2d_reduces_spatial_dimensions() {
+        let input = Tensor4D::from_vec(
+            1,
+            2,
+            2,
+            2,
+            vec![
+                1.0, 3.0, 5.0, 7.0, // channel 0
+                2.0, 4.0, 6.0, 8.0, // channel 1
+            ],
+        )
+        .unwrap_or_else(|_| panic!("input tensor should be valid"));
+
+        let pooled = input
+            .global_average_pool2d()
+            .unwrap_or_else(|_| panic!("global average pooling should succeed"));
+
+        assert_eq!(pooled.shape(), (1, 2, 1, 1));
+        assert_eq!(pooled.get(0, 0, 0, 0), Ok(4.0));
+        assert_eq!(pooled.get(0, 1, 0, 0), Ok(5.0));
+    }
+
+    #[test]
+    fn tensor4d_flatten_batch_features_returns_per_sample_vectors() {
+        let tensor = Tensor4D::from_vec(
+            2,
+            1,
+            2,
+            2,
+            vec![
+                1.0, 2.0, 3.0, 4.0, // sample 0
+                5.0, 6.0, 7.0, 8.0, // sample 1
+            ],
+        )
+        .unwrap_or_else(|_| panic!("tensor should be valid"));
+
+        let flat = tensor.flatten_batch_features();
+
+        assert_eq!(flat.len(), 2);
+        assert_eq!(flat[0], vec![1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(flat[1], vec![5.0, 6.0, 7.0, 8.0]);
+    }
+
+    #[test]
+    fn tensor4d_backend_wrappers_match_cpu_operations() {
+        let backend = cpu_backend();
+
+        let input = Tensor4D::from_vec(
+            1,
+            1,
+            3,
+            3,
+            vec![
+                1.0, 2.0, 3.0,
+                4.0, 5.0, 6.0,
+                7.0, 8.0, 9.0,
+            ],
+        )
+        .unwrap_or_else(|_| panic!("input tensor should be valid"));
+        let kernels = Tensor4D::from_vec(1, 1, 2, 2, vec![1.0, 0.0, 0.0, 1.0])
+            .unwrap_or_else(|_| panic!("kernel tensor should be valid"));
+
+        let conv = input
+            .conv2d_valid_with_backend(&backend, &kernels, Some(&[1.0]), 1, 1)
+            .unwrap_or_else(|_| panic!("backend convolution should succeed"));
+        let pooled = conv
+            .max_pool2d_with_backend(&backend, 2, 2, 1, 1)
+            .unwrap_or_else(|_| panic!("backend pooling should succeed"));
+        let gap = pooled
+            .global_average_pool2d_with_backend(&backend)
+            .unwrap_or_else(|_| panic!("backend global average pooling should succeed"));
+
+        assert_eq!(conv.shape(), (1, 1, 2, 2));
+        assert_eq!(pooled.shape(), (1, 1, 1, 1));
+        assert_eq!(gap.shape(), (1, 1, 1, 1));
+
+        let mut relu_tensor = Tensor4D::from_vec(1, 1, 1, 2, vec![-1.0, 3.0])
+            .unwrap_or_else(|_| panic!("relu tensor should be valid"));
+        relu_tensor.relu_inplace_with_backend(&backend);
+        assert_eq!(relu_tensor.as_slice(), &[0.0, 3.0]);
     }
 }
