@@ -13,10 +13,20 @@ mod cnn_classifier_walkthrough;
 mod trainer_fixtures;
 mod trainer_presentation;
 mod trainer_walkthrough;
+mod rag_walkthrough;
+mod rag_dataset_walkthrough;
+mod multimodal_tensor_walkthrough;
+#[cfg(test)]
+mod rag_tensor_tests;
+#[cfg(test)]
+mod multimodal_tensor_variants_tests;
 
 fn main() {
     println!("Multimodal brain demo");
     multimodal_demo::run_multimodal_demo();
     trainer_walkthrough::run_trainer_walkthrough();
     cnn_classifier_walkthrough::run_cnn_classifier_walkthrough();
+    rag_walkthrough::run_rag_walkthrough();
+    rag_dataset_walkthrough::run_rag_dataset_walkthrough();
+    multimodal_tensor_walkthrough::run_multimodal_tensor_walkthrough();
 }

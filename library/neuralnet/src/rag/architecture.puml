@@ -1,0 +1,75 @@
+@startuml
+left to right direction
+skinparam packageStyle rectangle
+skinparam shadowing false
+skinparam monochrome true
+skinparam classAttributeIconSize 0
+
+title neuralnet/src/rag class structure
+
+package "rag" {
+  interface Retriever {
+    + retrieve(query: &str, top_k: usize): Vec<RagChunk>
+  }
+
+  interface Generator {
+    + generate(question: &str, context: &RagContext): String
+  }
+
+  class RagPipeline<R,G> {
+    - retriever: R
+    - generator: G
+    - top_k: usize
+    + new(retriever: R, generator: G, top_k: usize): RagPipeline<R,G>
+    + answer_text(question: &str): RagAnswer
+    + answer_with_brain(brain: &MultiModalBrain, input: &MultiModalInput): RagAnswer
+  }
+
+  class BrainRagBridge {
+    + query_from_input(input: &MultiModalInput): String
+    + classify_hint(brain: &MultiModalBrain, input: &MultiModalInput): Option<ClassificationResult>
+  }
+
+  class RagDocument {
+    + id: String
+    + text: String
+    + metadata: HashMap<String, String>
+  }
+
+  class RagChunk {
+    + document_id: String
+    + chunk_id: String
+    + text: String
+    + score: f64
+  }
+
+  class RagContext {
+    + query: String
+    + chunks: Vec<RagChunk>
+  }
+
+  class RagAnswer {
+    + answer: String
+    + context: RagContext
+    + model_label_hint: Option<String>
+    + model_score_hint: Option<f64>
+  }
+}
+
+class MultiModalBrain <<external>>
+class MultiModalInput <<external>>
+class ClassificationResult <<external>>
+
+RagPipeline ..> Retriever
+RagPipeline ..> Generator
+RagPipeline ..> RagContext
+RagPipeline ..> RagAnswer
+RagPipeline ..> BrainRagBridge
+RagPipeline ..> MultiModalBrain
+
+BrainRagBridge ..> MultiModalInput
+BrainRagBridge ..> ClassificationResult
+
+RagContext *-- RagChunk
+RagAnswer *-- RagContext
+@enduml

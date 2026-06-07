@@ -1,0 +1,52 @@
+@startuml
+left to right direction
+skinparam packageStyle rectangle
+skinparam shadowing false
+skinparam monochrome true
+skinparam classAttributeIconSize 0
+
+title neuron/src high-level module structure
+
+package "neuron app" {
+  class AppMain {
+    + main()
+  }
+
+  class MultimodalDemo {
+    + run_multimodal_demo()
+  }
+
+  class TrainerWalkthrough {
+    + run_trainer_walkthrough()
+  }
+
+  class CnnClassifierWalkthrough {
+    + run_cnn_classifier_walkthrough()
+  }
+
+  class TrainerFixtures {
+    + initial_trainer_batches()
+    + train_samples()
+    + validation_samples()
+  }
+
+  class TrainerPresentation {
+    + print_confusion_matrix(...)
+    + print_loop_summary(...)
+  }
+}
+
+class MultiModalNeuralNetwork <<external: neuralnet>>
+
+AppMain ..> MultimodalDemo
+AppMain ..> TrainerWalkthrough
+AppMain ..> CnnClassifierWalkthrough
+
+MultimodalDemo ..> MultiModalNeuralNetwork
+TrainerWalkthrough ..> MultiModalNeuralNetwork
+CnnClassifierWalkthrough ..> MultiModalNeuralNetwork
+
+TrainerWalkthrough ..> TrainerFixtures
+TrainerWalkthrough ..> TrainerPresentation
+CnnClassifierWalkthrough ..> TrainerPresentation
+@enduml

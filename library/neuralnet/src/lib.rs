@@ -13,6 +13,7 @@
     - `dendrites`:  Contains definitions for different types of dendrites used in the neural network.
     - `helpers`:    Contains helper functions and utilities for working with multimodal data and other common tasks.
     - `tensor`:     Contains definitions and utilities for working with tensors, including 4D tensors for CNNs and image processing utilities.
+    - `rag`:        Contains retrieval-augmented generation interfaces and orchestration that compose with the core brain.
 
     This is supplied under the GPL-3.0 license. See LICENSE file in the project root for full license text.
     Author: Sam Colak (sam@samcolak.com)
@@ -25,3 +26,4 @@ pub mod training;
 pub mod dendrites;
 pub mod helpers;
 pub mod tensor;
+pub mod rag;
