@@ -16,6 +16,7 @@ mod trainer_walkthrough;
 mod rag_walkthrough;
 mod rag_dataset_walkthrough;
 mod multimodal_tensor_walkthrough;
+mod brain_stress_walkthrough;
 #[cfg(test)]
 mod rag_tensor_tests;
 #[cfg(test)]
@@ -29,4 +30,5 @@ fn main() {
     rag_walkthrough::run_rag_walkthrough();
     rag_dataset_walkthrough::run_rag_dataset_walkthrough();
     multimodal_tensor_walkthrough::run_multimodal_tensor_walkthrough();
+    brain_stress_walkthrough::run_brain_stress_walkthrough();
 }

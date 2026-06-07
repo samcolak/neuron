@@ -1,4 +1,5 @@
 use neuralnet::helpers::multimodal_controller::MultiModalInput;
+use neuralnet::tensor::tensor4d::Tensor4D;
 use neuralnet::tensor::adapters::{
     image_bytes_to_tensor_nchw,
     image_bytes_to_tensor_nchw_resized_with_channels,
@@ -6,6 +7,30 @@ use neuralnet::tensor::adapters::{
     multimodal_input_to_tensor_nchw,
     multimodal_input_to_tensor_nchw_resized,
 };
+use std::time::Instant;
+
+fn compare_tensors(left: &Tensor4D, right: &Tensor4D) -> (usize, f32, f32) {
+    let mut mismatch_count = 0usize;
+    let mut max_abs_delta = 0.0f32;
+    let mut mean_abs_delta = 0.0f32;
+
+    for (l, r) in left.as_slice().iter().zip(right.as_slice().iter()) {
+        let delta = (*l - *r).abs();
+        if delta > 0.0 {
+            mismatch_count += 1;
+        }
+        if delta > max_abs_delta {
+            max_abs_delta = delta;
+        }
+        mean_abs_delta += delta;
+    }
+
+    if !left.is_empty() {
+        mean_abs_delta /= left.len() as f32;
+    }
+
+    (mismatch_count, max_abs_delta, mean_abs_delta)
+}
 
 pub fn run_multimodal_tensor_walkthrough() {
     println!("\nMultimodal tensor walkthrough");
@@ -72,4 +97,80 @@ pub fn run_multimodal_tensor_walkthrough() {
     let text = MultiModalInput::Text("cat on mat".to_string());
     let text_result = multimodal_input_to_tensor_nchw(&text, 1, 1, false);
     println!("    text adaptation result={:?}", text_result);
+
+    println!("  step 6: explicit tensor comparison metrics");
+    let single = Tensor4D::from_vec(1, 1, 2, 2, vec![1.0, 2.0, 3.0, 4.0])
+        .unwrap_or_else(|_| panic!("single tensor should be valid"));
+    let multi = Tensor4D::from_vec(
+        1,
+        2,
+        2,
+        2,
+        vec![
+            1.0, 2.0, 3.0, 4.0, // channel 0
+            0.0, 0.0, 0.0, 0.0, // channel 1
+        ],
+    )
+    .unwrap_or_else(|_| panic!("multi tensor should be valid"));
+
+    let kernel_single = Tensor4D::from_vec(1, 1, 1, 1, vec![2.0])
+        .unwrap_or_else(|_| panic!("single kernel should be valid"));
+    let kernel_multi = Tensor4D::from_vec(1, 2, 1, 1, vec![2.0, 0.0])
+        .unwrap_or_else(|_| panic!("multi kernel should be valid"));
+
+    let start_single = Instant::now();
+    let out_single = single
+        .conv2d_valid(&kernel_single, None, 1, 1)
+        .unwrap_or_else(|_| panic!("single conv should succeed"));
+    let single_us = start_single.elapsed().as_micros();
+
+    let start_multi = Instant::now();
+    let out_multi = multi
+        .conv2d_valid(&kernel_multi, None, 1, 1)
+        .unwrap_or_else(|_| panic!("multi conv should succeed"));
+    let multi_us = start_multi.elapsed().as_micros();
+
+    let (mismatch_count, max_abs_delta, mean_abs_delta) = compare_tensors(&out_single, &out_multi);
+    let numerically_equivalent = mismatch_count == 0;
+
+    println!(
+        "    single_vs_multi_zero_channel: shape={:?} mismatches={} max_abs_delta={:.6} mean_abs_delta={:.6}",
+        out_single.shape(),
+        mismatch_count,
+        max_abs_delta,
+        mean_abs_delta
+    );
+    println!(
+        "    single_conv_us={} multi_conv_us={} equivalent={}",
+        single_us,
+        multi_us,
+        numerically_equivalent
+    );
+
+    let single_signal = Tensor4D::from_vec(1, 1, 1, 1, vec![2.0])
+        .unwrap_or_else(|_| panic!("single signal tensor should be valid"));
+    let multi_signal = Tensor4D::from_vec(1, 2, 1, 1, vec![2.0, 5.0])
+        .unwrap_or_else(|_| panic!("multi signal tensor should be valid"));
+    let kernel_single_signal = Tensor4D::from_vec(1, 1, 1, 1, vec![3.0])
+        .unwrap_or_else(|_| panic!("single signal kernel should be valid"));
+    let kernel_multi_signal = Tensor4D::from_vec(1, 2, 1, 1, vec![3.0, 1.0])
+        .unwrap_or_else(|_| panic!("multi signal kernel should be valid"));
+
+    let out_single_signal = single_signal
+        .conv2d_valid(&kernel_single_signal, None, 1, 1)
+        .unwrap_or_else(|_| panic!("single signal conv should succeed"));
+    let out_multi_signal = multi_signal
+        .conv2d_valid(&kernel_multi_signal, None, 1, 1)
+        .unwrap_or_else(|_| panic!("multi signal conv should succeed"));
+
+    let baseline = out_single_signal.get(0, 0, 0, 0).unwrap_or(0.0);
+    let enriched = out_multi_signal.get(0, 0, 0, 0).unwrap_or(0.0);
+    let uplift = enriched - baseline;
+
+    println!(
+        "    extra_channel_signal: baseline={:.3} enriched={:.3} uplift={:.3}",
+        baseline,
+        enriched,
+        uplift
+    );
 }

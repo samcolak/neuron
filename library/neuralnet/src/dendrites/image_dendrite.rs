@@ -1,6 +1,6 @@
 
 use crate::helpers::axon::Axon;
-use crate::core::nodenet::{NetworkNode, NodeMetadata};
+use crate::core::nodenet::{NetworkNode, NodeMetadata, NodePayload};
 use crate::dendrites::text_dendrite::DendriteType;
 
 use serde::{Deserialize, Serialize};
@@ -10,7 +10,7 @@ use std::collections::HashMap;
 pub struct ImageDendrite {
     pub uid: String,
     pub connections: Vec<Axon>,
-    pub data: String,
+    pub data: NodePayload,
     pub feature_type: String,
     pub metadata: NodeMetadata,
     pub dendrite_type: DendriteType,
@@ -30,7 +30,7 @@ impl ImageDendrite {
         Self {
             uid,
             connections: Vec::new(),
-            data: data.to_string(),
+            data: NodePayload::text(data),
             feature_type: "image_feature".to_string(),
             metadata: metadata.clone(),
             dendrite_type,
@@ -74,7 +74,7 @@ impl NetworkNode for ImageDendrite {
     }
 
     fn data(&self) -> &str {
-        &self.data
+        self.data.as_text().unwrap_or("")
     }
 
     fn normalized_key(&self) -> &str {

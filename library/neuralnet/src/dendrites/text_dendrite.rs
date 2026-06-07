@@ -1,6 +1,6 @@
 
 use crate::helpers::axon::Axon;
-use crate::core::nodenet::{NetworkNode, NodeMetadata};
+use crate::core::nodenet::{NetworkNode, NodeMetadata, NodePayload};
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -56,7 +56,7 @@ fn normalize_data_key(input: &str) -> String {
 pub struct TextDendrite {
     pub uid: String,
     pub connections: Vec<Axon>,
-    pub data: String,
+    pub data: NodePayload,
     pub result: Option<String>,
     pub metadata: NodeMetadata,
     pub dendrite_type: DendriteType,
@@ -76,7 +76,7 @@ impl TextDendrite {
         Self {
             uid,
             connections: Vec::new(),
-            data: data.to_string(),
+            data: NodePayload::text(data),
             metadata: metadata.clone(),
             dendrite_type,
             normalized_key,
@@ -120,7 +120,7 @@ impl NetworkNode for TextDendrite {
     }
 
     fn data(&self) -> &str {
-        &self.data
+        self.data.as_text().unwrap_or("")
     }
 
     fn normalized_key(&self) -> &str {

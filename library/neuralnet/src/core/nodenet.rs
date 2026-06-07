@@ -3,6 +3,7 @@ use crate::dendrites::text_dendrite::DendriteType;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt::{Display, Formatter};
 
 use uuid::Uuid;
 
@@ -10,6 +11,57 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NodeMetadata {
     pub attributes: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum NodePayload {
+    Text(String),
+    ImageBytes(Vec<u8>),
+    FeatureTokens {
+        modality: String,
+        tokens: Vec<String>,
+    },
+}
+
+impl Default for NodePayload {
+    fn default() -> Self {
+        Self::Text(String::new())
+    }
+}
+
+impl NodePayload {
+    pub fn text(value: &str) -> Self {
+        Self::Text(value.to_string())
+    }
+
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            Self::Text(value) => Some(value.as_str()),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.as_text().unwrap_or("")
+    }
+}
+
+impl Display for NodePayload {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Text(value) => write!(f, "{}", value),
+            Self::ImageBytes(bytes) => write!(f, "<image_bytes:{}>", bytes.len()),
+            Self::FeatureTokens { modality, tokens } => {
+                write!(f, "<feature_tokens:{}:{}>", modality, tokens.len())
+            }
+        }
+    }
+}
+
+impl PartialEq<&str> for NodePayload {
+    fn eq(&self, other: &&str) -> bool {
+        matches!(self, Self::Text(value) if value == other)
+    }
 }
 
 impl NodeMetadata {

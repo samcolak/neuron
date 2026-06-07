@@ -3,15 +3,18 @@ use std::fs;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
+use std::collections::HashMap;
 
 use crate::cnn::feature_extractor::CnnFeatureExtractor;
-use crate::core::nodenet::{NodeMetadata, NodeNetwork};
+use crate::core::nodenet::{NodeMetadata, NodeNetwork, NodePayload};
 use crate::helpers::image_io::{ImageIoError, load_png_or_jpeg_from_path};
-use crate::helpers::multimodal_controller::MultiModalInput;
+use crate::helpers::multimodal_controller::{MultiModalController, MultiModalInput};
 use crate::helpers::multimodal_neuralnet::MultiModalSubNetwork;
+use crate::helpers::axon::Axon;
 use crate::helpers::pattern_classifier::{ClassificationResult, PatternClassifier};
 use crate::dendrites::text_dendrite::DendriteType;
 use crate::dendrites::multimodal_dendrite::MultimodalDendrite;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuestionStoreDecision {
@@ -39,7 +42,85 @@ pub struct SnapshotLoadStatus {
     pub classifier_loaded: bool,
 }
 
-const MULTIMODAL_BIN_MAGIC: [u8; 4] = *b"MMB1";
+const MULTIMODAL_BIN_MAGIC_V1: [u8; 4] = *b"MMB1";
+const MULTIMODAL_BIN_MAGIC_V2: [u8; 4] = *b"MMB2";
+
+#[derive(Debug, Clone, Default)]
+struct AutoSnapshotPolicy {
+    instance_id: Option<String>,
+    dir: Option<PathBuf>,
+    every_n_inserts: usize,
+    pending_inserts: usize,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LegacyMultimodalDendriteV1 {
+    uid: String,
+    connections: Vec<Axon>,
+    data: String,
+    modality: String,
+    metadata: NodeMetadata,
+    dendrite_type: DendriteType,
+    #[serde(skip, default)]
+    normalized_key: String,
+    #[serde(skip, default)]
+    connection_index: HashMap<String, usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LegacyMultiModalSubNetworkV1 {
+    dendrites: HashMap<String, LegacyMultimodalDendriteV1>,
+    #[serde(skip, default)]
+    token_index: HashMap<String, Vec<String>>,
+    #[serde(skip, default)]
+    token_cluster_index: HashMap<String, Vec<String>>,
+    #[serde(skip, default)]
+    controller: MultiModalController,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MultiModalSubNetworkSerdeBridge {
+    dendrites: HashMap<String, MultimodalDendrite>,
+    #[serde(skip, default)]
+    token_index: HashMap<String, Vec<String>>,
+    #[serde(skip, default)]
+    token_cluster_index: HashMap<String, Vec<String>>,
+    #[serde(skip, default)]
+    controller: MultiModalController,
+}
+
+impl From<LegacyMultimodalDendriteV1> for MultimodalDendrite {
+    fn from(value: LegacyMultimodalDendriteV1) -> Self {
+        Self {
+            uid: value.uid,
+            connections: value.connections,
+            data: NodePayload::Text(value.data),
+            modality: value.modality,
+            metadata: value.metadata,
+            dendrite_type: value.dendrite_type,
+            normalized_key: value.normalized_key,
+            connection_index: value.connection_index,
+        }
+    }
+}
+
+impl From<LegacyMultiModalSubNetworkV1> for MultiModalSubNetworkSerdeBridge {
+    fn from(value: LegacyMultiModalSubNetworkV1) -> Self {
+        let mut upgraded = HashMap::new();
+
+        for (uid, node) in value.dendrites {
+            upgraded.insert(uid, node.into());
+        }
+
+        Self {
+            dendrites: upgraded,
+            token_index: value.token_index,
+            token_cluster_index: value.token_cluster_index,
+            controller: value.controller,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct MultiModalBrain {
@@ -47,17 +128,100 @@ pub struct MultiModalBrain {
     memory_net: MultiModalSubNetwork,
     classifier: PatternClassifier,
     image_feature_extractor: Option<CnnFeatureExtractor>,
+    auto_snapshot: AutoSnapshotPolicy,
 }
 
 pub type MultiModalNeuralNetwork = MultiModalBrain;
 
 impl MultiModalBrain {
+    
     pub fn new_multimodal() -> Self {
         Self {
             cognitive_net: MultiModalSubNetwork::new_multimodal(),
             memory_net: MultiModalSubNetwork::new_multimodal(),
             classifier: PatternClassifier::new(),
             image_feature_extractor: None,
+            auto_snapshot: AutoSnapshotPolicy::default(),
+        }
+    }
+
+    pub fn enable_auto_snapshot(&mut self, instance_id: &str, every_n_inserts: usize) {
+        self.auto_snapshot.instance_id = Some(instance_id.trim().to_string());
+        self.auto_snapshot.dir = None;
+        self.auto_snapshot.every_n_inserts = every_n_inserts.max(1);
+        self.auto_snapshot.pending_inserts = 0;
+        self.auto_snapshot.last_error = None;
+    }
+
+    pub fn enable_auto_snapshot_in_dir(
+        &mut self,
+        instance_id: &str,
+        dir: &Path,
+        every_n_inserts: usize,
+    ) {
+        self.auto_snapshot.instance_id = Some(instance_id.trim().to_string());
+        self.auto_snapshot.dir = Some(dir.to_path_buf());
+        self.auto_snapshot.every_n_inserts = every_n_inserts.max(1);
+        self.auto_snapshot.pending_inserts = 0;
+        self.auto_snapshot.last_error = None;
+    }
+
+    pub fn disable_auto_snapshot(&mut self) {
+        self.auto_snapshot = AutoSnapshotPolicy::default();
+    }
+
+    pub fn flush_auto_snapshot(&mut self) -> io::Result<bool> {
+        if self.auto_snapshot.instance_id.is_none() || self.auto_snapshot.pending_inserts == 0 {
+            return Ok(false);
+        }
+
+        self.persist_auto_snapshot_now()?;
+        self.auto_snapshot.pending_inserts = 0;
+        self.auto_snapshot.last_error = None;
+
+        Ok(true)
+    }
+
+    pub fn auto_snapshot_pending_inserts(&self) -> usize {
+        self.auto_snapshot.pending_inserts
+    }
+
+    pub fn auto_snapshot_last_error(&self) -> Option<&str> {
+        self.auto_snapshot.last_error.as_deref()
+    }
+
+    fn persist_auto_snapshot_now(&self) -> io::Result<()> {
+        let Some(instance_id) = self.auto_snapshot.instance_id.as_deref() else {
+            return Ok(());
+        };
+
+        if let Some(dir) = self.auto_snapshot.dir.as_deref() {
+            self.snapshot_instance_in_dir(instance_id, dir)
+        } else {
+            self.snapshot_instance(instance_id)
+        }
+    }
+
+    fn maybe_auto_snapshot_after_insert(&mut self) {
+        if self.auto_snapshot.instance_id.is_none() {
+            return;
+        }
+
+        self.auto_snapshot.pending_inserts = self.auto_snapshot.pending_inserts.saturating_add(1);
+        let every_n = self.auto_snapshot.every_n_inserts.max(1);
+
+        if self.auto_snapshot.pending_inserts < every_n {
+            return;
+        }
+
+        match self.persist_auto_snapshot_now() {
+            Ok(()) => {
+                self.auto_snapshot.pending_inserts = 0;
+                self.auto_snapshot.last_error = None;
+            }
+            Err(err) => {
+                self.auto_snapshot.last_error = Some(err.to_string());
+            }
         }
     }
 
@@ -129,6 +293,8 @@ impl MultiModalBrain {
     ) {
         self.memory_net
             .insert_content(content, metadata, dendrite_type);
+
+        self.maybe_auto_snapshot_after_insert();
     }
 
     pub fn absorb_true_text(
@@ -307,6 +473,8 @@ impl MultiModalBrain {
     ) {
         self.cognitive_net
             .insert_content(content, metadata, dendrite_type);
+
+        self.maybe_auto_snapshot_after_insert();
     }
 
     pub fn enumerate_multimodal_path(
@@ -363,6 +531,7 @@ impl MultiModalBrain {
     }
 
     pub fn evaluate_question_fuzziness(&self, content: &MultiModalInput) -> f64 {
+
         let cognitive_score = self.cognitive_net.fuzzy_success_score_for_content(content);
 
         if cognitive_score >= 0.0 {
@@ -370,9 +539,11 @@ impl MultiModalBrain {
         }
 
         self.memory_net.fuzzy_success_score_for_content(content)
+
     }
 
     pub fn decide_question_storage(&self, content: &MultiModalInput) -> QuestionStoreDecision {
+
         let score = self.evaluate_question_fuzziness(content);
 
         if score < 0.0 {
@@ -384,6 +555,7 @@ impl MultiModalBrain {
         } else {
             QuestionStoreDecision::DoNotStore
         }
+
     }
 
     pub fn insert_image_from_file(
@@ -392,33 +564,29 @@ impl MultiModalBrain {
         metadata: &NodeMetadata,
         dendrite_type: DendriteType,
     ) -> Result<(), ImageIoError> {
+        
         let image_buffer = load_png_or_jpeg_from_path(path)?;
         self.insert_image_bytes(image_buffer.as_slice(), metadata, dendrite_type);
 
         Ok(())
+
     }
+    
 }
 
 fn load_multimodal_network_from_file(
     network: &mut MultiModalSubNetwork,
     path: &Path,
 ) -> io::Result<bool> {
+
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(err) => return Err(err),
     };
 
-    if bytes.len() >= 4 && bytes[0..4] == MULTIMODAL_BIN_MAGIC {
-        let loaded = bincode::deserialize::<MultiModalSubNetwork>(&bytes[4..]).map_err(|err| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "failed to decode multimodal snapshot '{}': {err}",
-                    path.display()
-                ),
-            )
-        })?;
+    if bytes.len() >= 4 && bytes[0..4] == MULTIMODAL_BIN_MAGIC_V2 {
+        let loaded = decode_multimodal_network_payload(&bytes[4..], path)?;
 
         *network = loaded;
         network.rebuild_connection_indexes();
@@ -427,21 +595,80 @@ fn load_multimodal_network_from_file(
         return Ok(true);
     }
 
-    let loaded = serde_json::from_slice::<MultiModalSubNetwork>(&bytes).map_err(|err| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "failed to decode multimodal snapshot '{}': {err}",
-                path.display()
-            ),
-        )
-    })?;
+    if bytes.len() >= 4 && bytes[0..4] == MULTIMODAL_BIN_MAGIC_V1 {
+        let loaded = decode_multimodal_network_payload(&bytes[4..], path)?;
+
+        *network = loaded;
+        network.rebuild_connection_indexes();
+        network.rebuild_token_index();
+
+        return Ok(true);
+    }
+
+    let loaded = decode_multimodal_network_json(&bytes, path)?;
 
     *network = loaded;
     network.rebuild_connection_indexes();
     network.rebuild_token_index();
 
     Ok(true)
+
+}
+
+fn decode_multimodal_network_payload(
+    payload: &[u8],
+    path: &Path,
+) -> io::Result<MultiModalSubNetwork> {
+
+    match bincode::deserialize::<MultiModalSubNetwork>(payload) {
+        Ok(current) => Ok(current),
+        Err(current_err) => {
+            let legacy = bincode::deserialize::<LegacyMultiModalSubNetworkV1>(payload).map_err(|legacy_err| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "failed to decode multimodal snapshot '{}': current_format_err={current_err}; legacy_format_err={legacy_err}",
+                        path.display()
+                    ),
+                )
+            })?;
+
+            Ok(transcode_legacy_bridge_to_network(legacy.into()))
+        }
+    }
+
+}
+
+fn decode_multimodal_network_json(
+    payload: &[u8],
+    path: &Path,
+) -> io::Result<MultiModalSubNetwork> {
+
+    match serde_json::from_slice::<MultiModalSubNetwork>(payload) {
+        Ok(current) => Ok(current),
+        Err(current_err) => {
+            let legacy = serde_json::from_slice::<LegacyMultiModalSubNetworkV1>(payload).map_err(|legacy_err| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "failed to decode multimodal snapshot '{}': current_json_err={current_err}; legacy_json_err={legacy_err}",
+                        path.display()
+                    ),
+                )
+            })?;
+
+            Ok(transcode_legacy_bridge_to_network(legacy.into()))
+        }
+    }
+
+}
+
+fn transcode_legacy_bridge_to_network(
+    bridge: MultiModalSubNetworkSerdeBridge,
+) -> MultiModalSubNetwork {
+    let mut network = MultiModalSubNetwork::with_controller(bridge.controller);
+    *network.dendrites_mut() = bridge.dendrites;
+    network
 }
 
 fn save_multimodal_network_to_file(network: &MultiModalSubNetwork, path: &Path) -> io::Result<()> {
@@ -461,8 +688,8 @@ fn save_multimodal_network_to_file(network: &MultiModalSubNetwork, path: &Path) 
         )
     })?;
 
-    let mut bytes = Vec::with_capacity(MULTIMODAL_BIN_MAGIC.len() + encoded.len());
-    bytes.extend_from_slice(&MULTIMODAL_BIN_MAGIC);
+    let mut bytes = Vec::with_capacity(MULTIMODAL_BIN_MAGIC_V2.len() + encoded.len());
+    bytes.extend_from_slice(&MULTIMODAL_BIN_MAGIC_V2);
     bytes.extend_from_slice(&encoded);
 
     let tmp_path = path.with_extension(format!(
@@ -877,6 +1104,145 @@ mod tests {
                 .map(|prediction| prediction.label),
             Some("animal_cat".to_string())
         );
+        cleanup_snapshot_test_dir(test_name);
+    }
+
+    #[test]
+    fn brain_snapshot_writes_v2_magic_header() {
+        let test_name = "brain_snapshot_v2_magic";
+        let test_dir = snapshot_test_dir(test_name);
+        cleanup_snapshot_test_dir(test_name);
+
+        let mut network = MultiModalNeuralNetwork::new_multimodal();
+        let metadata = NodeMetadata::with_lang("en");
+        network.insert_text("header check", &metadata, DendriteType::Statement);
+
+        let snapshot_id = "brain_snapshot_v2_magic";
+        network
+            .snapshot_instance_in_dir(snapshot_id, &test_dir)
+            .expect("snapshot should persist");
+
+        let (cognitive_path, _, _) = network.snapshot_paths_for_instance_in_dir(snapshot_id, &test_dir);
+        let bytes = fs::read(cognitive_path).expect("cognitive snapshot should be readable");
+
+        assert!(bytes.len() >= MULTIMODAL_BIN_MAGIC_V2.len());
+        assert_eq!(bytes[0..4], MULTIMODAL_BIN_MAGIC_V2);
+
+        cleanup_snapshot_test_dir(test_name);
+    }
+
+    #[test]
+    fn brain_snapshot_loads_legacy_v1_string_payload() {
+        let test_name = "brain_snapshot_legacy_v1";
+        let test_dir = snapshot_test_dir(test_name);
+        cleanup_snapshot_test_dir(test_name);
+
+        let path = test_dir.join("legacy_network.nrn");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("test snapshot dir should be creatable");
+        }
+
+        let legacy_uid = "legacy_node_a".to_string();
+        let legacy_node = LegacyMultimodalDendriteV1 {
+            uid: legacy_uid.clone(),
+            connections: Vec::new(),
+            data: "txt:legacy".to_string(),
+            modality: "txt".to_string(),
+            metadata: NodeMetadata::with_lang("en"),
+            dendrite_type: DendriteType::Token,
+            normalized_key: String::new(),
+            connection_index: HashMap::new(),
+        };
+
+        let mut legacy_dendrites = HashMap::new();
+        legacy_dendrites.insert(legacy_uid, legacy_node);
+
+        let legacy_network = LegacyMultiModalSubNetworkV1 {
+            dendrites: legacy_dendrites,
+            token_index: HashMap::new(),
+            token_cluster_index: HashMap::new(),
+            controller: MultiModalController,
+        };
+
+        let encoded = bincode::serialize(&legacy_network)
+            .expect("legacy snapshot payload should encode");
+        let mut bytes = Vec::with_capacity(MULTIMODAL_BIN_MAGIC_V1.len() + encoded.len());
+        bytes.extend_from_slice(&MULTIMODAL_BIN_MAGIC_V1);
+        bytes.extend_from_slice(&encoded);
+        fs::write(path.as_path(), bytes).expect("legacy snapshot file should be writable");
+
+        let mut loaded = MultiModalSubNetwork::new_multimodal();
+        let load_status = load_multimodal_network_from_file(&mut loaded, path.as_path())
+            .expect("legacy snapshot should load");
+
+        assert!(load_status);
+        assert!(loaded
+            .all_dendrites_sorted()
+            .iter()
+            .any(|node| node.data == "txt:legacy"));
+
+        cleanup_snapshot_test_dir(test_name);
+    }
+
+    #[test]
+    fn brain_auto_snapshot_batches_by_insert_count() {
+        let test_name = "brain_auto_snapshot_batches";
+        let test_dir = snapshot_test_dir(test_name);
+        cleanup_snapshot_test_dir(test_name);
+
+        let mut network = MultiModalNeuralNetwork::new_multimodal();
+        network.enable_auto_snapshot_in_dir("autosnap", &test_dir, 2);
+
+        let metadata = NodeMetadata::with_lang("en");
+        let (cognitive_path, memory_path, classifier_path) =
+            network.snapshot_paths_for_instance_in_dir("autosnap", &test_dir);
+
+        network.insert_text("first insert", &metadata, DendriteType::Statement);
+
+        assert!(!cognitive_path.exists());
+        assert!(!memory_path.exists());
+        assert!(!classifier_path.exists());
+        assert_eq!(network.auto_snapshot_pending_inserts(), 1);
+
+        network.insert_text("second insert", &metadata, DendriteType::Statement);
+
+        assert!(cognitive_path.exists());
+        assert!(memory_path.exists());
+        assert!(classifier_path.exists());
+        assert_eq!(network.auto_snapshot_pending_inserts(), 0);
+        assert!(network.auto_snapshot_last_error().is_none());
+
+        cleanup_snapshot_test_dir(test_name);
+    }
+
+    #[test]
+    fn brain_auto_snapshot_flush_persists_dirty_state() {
+        let test_name = "brain_auto_snapshot_flush";
+        let test_dir = snapshot_test_dir(test_name);
+        cleanup_snapshot_test_dir(test_name);
+
+        let mut network = MultiModalNeuralNetwork::new_multimodal();
+        network.enable_auto_snapshot_in_dir("autosnap_flush", &test_dir, 10);
+
+        let metadata = NodeMetadata::with_lang("en");
+        let (cognitive_path, memory_path, classifier_path) =
+            network.snapshot_paths_for_instance_in_dir("autosnap_flush", &test_dir);
+
+        network.insert_text("pending insert", &metadata, DendriteType::Statement);
+        assert_eq!(network.auto_snapshot_pending_inserts(), 1);
+        assert!(!cognitive_path.exists());
+
+        let flushed = network
+            .flush_auto_snapshot()
+            .expect("flush should persist pending inserts");
+
+        assert!(flushed);
+        assert!(cognitive_path.exists());
+        assert!(memory_path.exists());
+        assert!(classifier_path.exists());
+        assert_eq!(network.auto_snapshot_pending_inserts(), 0);
+        assert!(network.auto_snapshot_last_error().is_none());
+
         cleanup_snapshot_test_dir(test_name);
     }
 

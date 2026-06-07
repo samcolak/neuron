@@ -1,6 +1,6 @@
 
 use crate::helpers::axon::Axon;
-use crate::core::nodenet::{NetworkNode, NodeMetadata};
+use crate::core::nodenet::{NetworkNode, NodeMetadata, NodePayload};
 use crate::dendrites::text_dendrite::DendriteType;
 
 use serde::{Deserialize, Serialize};
@@ -10,7 +10,7 @@ use std::collections::HashMap;
 pub struct MultimodalDendrite {
     pub uid: String,
     pub connections: Vec<Axon>,
-    pub data: String,
+    pub data: NodePayload,
     pub modality: String,
     pub metadata: NodeMetadata,
     pub dendrite_type: DendriteType,
@@ -36,7 +36,7 @@ impl MultimodalDendrite {
         Self {
             uid,
             connections: Vec::new(),
-            data: data.to_string(),
+            data: NodePayload::text(data),
             modality,
             metadata: metadata.clone(),
             dendrite_type,
@@ -80,7 +80,7 @@ impl NetworkNode for MultimodalDendrite {
     }
 
     fn data(&self) -> &str {
-        &self.data
+        self.data.as_text().unwrap_or("")
     }
 
     fn normalized_key(&self) -> &str {
