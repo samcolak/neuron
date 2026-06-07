@@ -1,0 +1,15 @@
+{
+  "folders": [
+    {
+      "name": "neuralnet",
+      "path": "../library/neuralnet"
+    },
+    {
+      "name": "neuron",
+      "path": "./neuron"
+    }
+  ],
+  "settings": {
+    "rust-analyzer.checkOnSave.command": "clippy"
+  }
+}
