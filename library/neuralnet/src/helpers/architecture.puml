@@ -3,32 +3,85 @@ left to right direction
 skinparam packageStyle rectangle
 skinparam shadowing false
 skinparam monochrome true
-skinparam componentStyle rectangle
+skinparam classAttributeIconSize 0
 
-title neuralnet/src/helpers
+title neuralnet/src/helpers class structure
 
-package "src/helpers" {
-  artifact "axon.rs" as axon
-  artifact "image_io.rs" as image_io
-  artifact "multimodal_controller.rs" as controller
-  artifact "multimodal_neuralnet.rs" as multimodal_neuralnet
-  artifact "pattern_classifier.rs" as pattern_classifier
-  artifact "text_similarity.rs" as text_similarity
+package "helpers" {
+  class Axon {
+    + from: String
+    + to: String
+    + weight: i64
+    + new(from: String, to: String, weight: i64): Axon
+  }
+
+  enum SupportedImageFormat
+
+  class ImageByteBuffer {
+    + width: u32
+    + height: u32
+    + channels: u8
+    + format: SupportedImageFormat
+    + bytes: Vec<u8>
+    + as_slice(): &[u8]
+  }
+
+  enum ImageIoError
+
+  enum MultiModalInput {
+    Text
+    ImageBytes
+    FeatureTokens
+  }
+
+  class MultiModalController {
+    + tokenize(content: &MultiModalInput): Vec<String>
+    + normalize_token(token: &str): String
+    + evaluate_match(left: &str, right: &str): (f64, Vec<String>)
+    + cluster_key_for_token(token_key: &str): Option<String>
+  }
+
+  class LabeledPattern {
+    + label: String
+    + content: MultiModalInput
+  }
+
+  class ClassificationResult {
+    + label: String
+    + score: f64
+  }
+
+  class PatternClassifier {
+    - patterns: Vec<LabeledPattern>
+    - min_confidence: f64
+    + new(): PatternClassifier
+    + set_min_confidence(min_confidence: f64)
+    + train_example(label: &str, content: MultiModalInput)
+    + classify(input: &MultiModalInput): Option<ClassificationResult>
+    + classify_top_k(input: &MultiModalInput, k: usize): Vec<ClassificationResult>
+  }
+
+  class MultiModalSubNetwork <<type alias>>
 }
 
-component "src/core" as core <<module>>
-component "src/dendrites" as dendrites <<module>>
-component "image crate" as image <<external>>
+interface NodeNetworkController <<external>>
+interface TokenClusterKeyStrategy <<external>>
+interface NodeNetwork <<external>>
+class NeuralNetwork <<external>>
+class MultimodalDendrite <<external>>
 
-controller --> core : node metadata / controller traits
-controller --> text_similarity : fuzziness scoring
-image_io --> image : decode png/jpeg
-multimodal_neuralnet --> core : neural net types
-multimodal_neuralnet --> image_io : image loading
-multimodal_neuralnet --> controller : multimodal inputs
-multimodal_neuralnet --> dendrites : multimodal dendrite types
-pattern_classifier --> controller : input classification
-pattern_classifier --> core : controller traits
-axon --> core : serialized edge data only
-text_similarity --> core : no direct dependency
+TokenClusterKeyStrategy <|.. MultiModalController
+NodeNetworkController <|.. MultiModalController
+
+PatternClassifier *-- LabeledPattern
+PatternClassifier ..> ClassificationResult
+PatternClassifier ..> MultiModalInput
+PatternClassifier ..> MultiModalController
+
+MultiModalSubNetwork ..> NeuralNetwork
+MultiModalSubNetwork ..> MultimodalDendrite
+MultiModalSubNetwork ..> MultiModalController
+
+ImageByteBuffer ..> SupportedImageFormat
+ImageIoError <.. ImageByteBuffer
 @enduml

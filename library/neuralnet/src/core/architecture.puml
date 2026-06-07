@@ -3,43 +3,144 @@ left to right direction
 skinparam packageStyle rectangle
 skinparam shadowing false
 skinparam monochrome true
-skinparam componentStyle rectangle
+skinparam classAttributeIconSize 0
 
-title neuralnet/src/core
+title neuralnet/src/core class structure
 
-package "src/core" {
-  artifact "brain.rs" as brain
-  artifact "integration.rs" as integration
-  artifact "model.rs" as model
-  artifact "neuralnet.rs" as neuralnet
-  artifact "nodenet.rs" as nodenet
+package "core" {
+  class MultiModalBrain {
+    - cognitive_net: MultiModalSubNetwork
+    - memory_net: MultiModalSubNetwork
+    - classifier: PatternClassifier
+    - image_feature_extractor: Option<CnnFeatureExtractor>
+    + new_multimodal(): MultiModalBrain
+    + classify_pattern(content: &MultiModalInput): Option<ClassificationResult>
+    + classify_pattern_top_k(content: &MultiModalInput, k: usize): Vec<ClassificationResult>
+    + run_supervised_pipeline(...): BrainSupervisedPipelineReport
+    + snapshot_instance(instance_id: &str): io::Result<()>
+    + load_snapshot_instance(instance_id: &str): io::Result<SnapshotLoadStatus>
+  }
+
+  class NetworkDump {
+    + name: String
+    + nodes: Vec<MultimodalDendrite>
+  }
+
+  class BrainDump {
+    + cognitive: NetworkDump
+    + memory: NetworkDump
+  }
+
+  class SnapshotLoadStatus {
+    + cognitive_loaded: bool
+    + memory_loaded: bool
+    + classifier_loaded: bool
+  }
+
+  enum QuestionStoreDecision
+
+  class ProbePrediction {
+    + input: MultiModalInput
+    + prediction: Option<ClassificationResult>
+  }
+
+  class BrainSupervisedPipelineReport {
+    + training_loop_report: TrainingLoopReport
+    + final_evaluation: TrainerEvaluationReport
+    + probe_predictions: Vec<ProbePrediction>
+  }
+
+  class SupervisedSample {
+    + label: String
+    + content: MultiModalInput
+    + new(label: &str, content: MultiModalInput): SupervisedSample
+  }
+
+  interface TrainableModel {
+    + train_epoch(...): TrainerBatchReport
+    + evaluate_dataset(samples: &[SupervisedSample]): TrainerEvaluationReport
+    + save_checkpoint(checkpoint_id: &str, dir: &Path): io::Result<Vec<PathBuf>>
+    + load_checkpoint(checkpoint_id: &str, dir: &Path): io::Result<()>
+  }
+
+  class NeuralNetwork<C,N> {
+    - dendrites: HashMap<String, N>
+    - token_index: HashMap<String, Vec<String>>
+    - token_cluster_index: HashMap<String, Vec<String>>
+    - controller: C
+    + insert_content(content: &C::Content, metadata: &NodeMetadata, dendrite_type: DendriteType)
+    + enumerate_path_content(content: &C::Content): (Option<N>, Vec<N>)
+  }
+
+  class NodeMetadata {
+    + attributes: HashMap<String, String>
+    + new(): NodeMetadata
+    + with_lang(language: &str): NodeMetadata
+    + set(key: &str, value: &str)
+    + get(key: &str): Option<&str>
+  }
+
+  interface NetworkNode {
+    + new_node(data: &str, metadata: &NodeMetadata, dendrite_type: DendriteType): Self
+    + uid(): &str
+    + data(): &str
+    + connect(other: String, weight: i64)
+  }
+
+  interface TokenClusterKeyStrategy {
+    + cluster_key_for_token(token_key: &str): Option<String>
+  }
+
+  interface NodeNetworkController {
+    + tokenize(content: &Content): Vec<String>
+    + normalize_token(token: &str): String
+    + evaluate_match(left: &str, right: &str): (f64, Vec<String>)
+  }
+
+  interface NodeNetwork {
+    + insert_content(content: &Content, metadata: &NodeMetadata, dendrite_type: DendriteType)
+    + enumerate_path_content(content: &Content): (Option<Node>, Vec<Node>)
+  }
 }
 
-component "src/cnn" as cnn <<module>>
-component "src/dendrites" as dendrites <<module>>
-component "src/helpers" as helpers <<module>>
-component "src/tensor" as tensor <<module>>
-component "src/training" as training <<module>>
+class CnnFeatureExtractor <<external>>
+class MultiModalSubNetwork <<external>>
+class PatternClassifier <<external>>
+class ClassificationResult <<external>>
+class MultiModalInput <<external>>
+class DendriteType <<external>>
+class TrainingLoopConfig <<external>>
+class TrainingLoopReport <<external>>
+class TrainerEvaluationReport <<external>>
+class TrainerBatchReport <<external>>
+class MultimodalDendrite <<external>>
 
-brain --> cnn : feature extractor
-brain --> helpers : multimodal controller / classifier
-brain --> dendrites : dendrite types
-brain --> tensor : tensor-backed image path
+MultiModalBrain *-- PatternClassifier
+MultiModalBrain *-- MultiModalSubNetwork
+MultiModalBrain ..> CnnFeatureExtractor
+MultiModalBrain ..> MultiModalInput
+MultiModalBrain ..> DendriteType
 
-integration --> brain
-integration --> model
-integration --> nodenet
-integration --> helpers
-integration --> training
+TrainableModel <|.. MultiModalBrain
+TrainableModel ..> SupervisedSample
 
-model --> brain
-model --> nodenet
-model --> helpers
-model --> training
-model --> dendrites
+NeuralNetwork ..> NodeNetworkController
+NeuralNetwork ..> NetworkNode
+NodeNetworkController ..|> TokenClusterKeyStrategy
 
-neuralnet --> nodenet
-neuralnet --> dendrites
-nodenet --> helpers : axons / node network
-nodenet --> dendrites : node types
+ProbePrediction ..> MultiModalInput
+ProbePrediction ..> PatternClassifier
+BrainSupervisedPipelineReport *-- ProbePrediction
+BrainSupervisedPipelineReport ..> TrainingLoopReport
+BrainSupervisedPipelineReport ..> TrainerEvaluationReport
+
+MultiModalBrain ..> QuestionStoreDecision
+MultiModalBrain ..> NetworkDump
+MultiModalBrain ..> BrainDump
+MultiModalBrain ..> SnapshotLoadStatus
+MultiModalBrain ..> TrainingLoopConfig
+MultiModalBrain ..> TrainingLoopReport
+
+NodeNetwork ..> NodeNetworkController
+NodeNetwork ..> NetworkNode
 @enduml

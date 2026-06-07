@@ -3,41 +3,85 @@ left to right direction
 skinparam packageStyle rectangle
 skinparam shadowing false
 skinparam monochrome true
-skinparam componentStyle rectangle
+skinparam classAttributeIconSize 0
 
-title neuralnet/src/tensor
+title neuralnet/src/tensor class structure
 
-package "src/tensor" {
-  artifact "adapters.rs" as adapters
-  artifact "backend.rs" as backend
-  artifact "image_utils.rs" as image_utils
-  artifact "tensor4d.rs" as tensor4d
-  artifact "tensor_io.rs" as tensor_io
-  package "offloading" as offloading {
-    artifact "cpu_backend.rs" as cpu_backend
-    artifact "cuda_backend.rs" as cuda_backend
-    artifact "mlx_backend.rs" as mlx_backend
+package "tensor" {
+  enum TensorError
+  class Tensor4D {
+    + n: usize
+    + c: usize
+    + h: usize
+    + w: usize
+    + data: Vec<f32>
+    + zeros(n: usize, c: usize, h: usize, w: usize): Tensor4D
+    + shape(): (usize, usize, usize, usize)
+    + get(n: usize, c: usize, y: usize, x: usize): Result<f32, TensorError>
+    + set(n: usize, c: usize, y: usize, x: usize, value: f32): Result<(), TensorError>
   }
+
+  enum TensorIoError
+  enum TensorAdapterError
+  enum ImageTensorUtilityError
+
+  interface TensorBackend {
+    + conv2d(...): Result<Tensor4D, TensorError>
+    + relu(input: &Tensor4D): Result<Tensor4D, TensorError>
+    + max_pool2d(...): Result<Tensor4D, TensorError>
+  }
+
+  class CpuTensorBackend
+  class CudaTensorBackend
+  class MlxTensorBackend
+
+  class TensorAdapters <<module>> {
+    + image_bytes_to_tensor_nchw(...): Result<Tensor4D, TensorAdapterError>
+    + multimodal_input_to_tensor(...): Result<Tensor4D, TensorAdapterError>
+  }
+
+  class TensorIo <<module>> {
+    + save_tensor(path: &Path, tensor: &Tensor4D): Result<(), TensorIoError>
+    + load_tensor(path: &Path): Result<Tensor4D, TensorIoError>
+  }
+
+  class ImageUtils <<module>> {
+    + resize_grayscale_nearest(...): Result<Vec<u8>, ImageTensorUtilityError>
+    + center_crop_grayscale(...): Result<Vec<u8>, ImageTensorUtilityError>
+  }
+
+  class BackendSelector <<module>> {
+    + active_backend(): &dyn TensorBackend
+  }
+
+  class Offloading <<module>>
 }
 
-component "src/helpers" as helpers <<module>>
-component "image crate" as image <<external>>
-component "serde" as serde <<external>>
+class MultiModalInput <<external>>
+class Image <<external>>
 
-backend --> tensor4d : active backend interface
-backend --> offloading : runtime backend selection
+TensorBackend <|.. CpuTensorBackend
+TensorBackend <|.. CudaTensorBackend
+TensorBackend <|.. MlxTensorBackend
 
-tensor4d --> backend : active backend access
-adapters --> image_utils : resize / crop helpers
-adapters --> tensor4d : tensor conversion
-adapters --> helpers : multimodal inputs
-tensor_io --> tensor4d : tensor persistence
-tensor_io --> serde : serialize / deserialize
-cpu_backend --> backend
-cpu_backend --> tensor4d
-cuda_backend --> backend
-cuda_backend --> tensor4d
-mlx_backend --> backend
-mlx_backend --> tensor4d
-image_utils --> image : image type support
+Tensor4D ..> TensorError
+Tensor4D ..> TensorBackend
+
+TensorIo ..> Tensor4D
+TensorIo ..> TensorIoError
+
+TensorAdapters ..> Tensor4D
+TensorAdapters ..> TensorAdapterError
+TensorAdapters ..> ImageUtils
+TensorAdapters ..> MultiModalInput
+
+ImageUtils ..> ImageTensorUtilityError
+ImageUtils ..> Image
+
+BackendSelector ..> TensorBackend
+BackendSelector ..> Offloading
+
+Offloading *-- CpuTensorBackend
+Offloading *-- CudaTensorBackend
+Offloading *-- MlxTensorBackend
 @enduml

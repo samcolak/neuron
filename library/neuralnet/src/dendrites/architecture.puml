@@ -3,25 +3,68 @@ left to right direction
 skinparam packageStyle rectangle
 skinparam shadowing false
 skinparam monochrome true
-skinparam componentStyle rectangle
+skinparam classAttributeIconSize 0
 
-title neuralnet/src/dendrites
+title neuralnet/src/dendrites class structure
 
-package "src/dendrites" {
-  artifact "image_dendrite.rs" as image_dendrite
-  artifact "multimodal_dendrite.rs" as multimodal_dendrite
-  artifact "text_dendrite.rs" as text_dendrite
+package "dendrites" {
+  enum DendriteType {
+    Unknown
+    Question
+    Statement
+    Token
+    StopWord
+    Other
+  }
+
+  class TextDendrite {
+    + uid: String
+    + connections: Vec<Axon>
+    + data: String
+    + metadata: NodeMetadata
+    + dendrite_type: DendriteType
+    + new(data: &str, metadata: &NodeMetadata, dendrite_type: DendriteType): TextDendrite
+    + connect(other: String, weight: i64)
+  }
+
+  class ImageDendrite {
+    + uid: String
+    + connections: Vec<Axon>
+    + data: String
+    + feature_type: String
+    + metadata: NodeMetadata
+    + new(data: &str, metadata: &NodeMetadata, dendrite_type: DendriteType): ImageDendrite
+    + connect(other: String, weight: i64)
+  }
+
+  class MultimodalDendrite {
+    + uid: String
+    + connections: Vec<Axon>
+    + data: String
+    + modality: String
+    + metadata: NodeMetadata
+    + new(data: &str, metadata: &NodeMetadata, dendrite_type: DendriteType): MultimodalDendrite
+    + connect(other: String, weight: i64)
+  }
 }
 
-component "src/core" as core <<module>>
-component "src/helpers" as helpers <<module>>
+interface NetworkNode <<external>>
+class NodeMetadata <<external>>
+class Axon <<external>>
 
-text_dendrite --> core : node metadata and network node traits
-text_dendrite --> helpers : axon connections
-image_dendrite --> core : node metadata and network node traits
-image_dendrite --> helpers : axon connections
-image_dendrite --> text_dendrite : shared dendrite enum
-multimodal_dendrite --> core : node metadata and network node traits
-multimodal_dendrite --> helpers : axon connections
-multimodal_dendrite --> text_dendrite : shared dendrite enum
+NetworkNode <|.. TextDendrite
+NetworkNode <|.. ImageDendrite
+NetworkNode <|.. MultimodalDendrite
+
+TextDendrite *-- Axon
+ImageDendrite *-- Axon
+MultimodalDendrite *-- Axon
+
+TextDendrite ..> NodeMetadata
+ImageDendrite ..> NodeMetadata
+MultimodalDendrite ..> NodeMetadata
+
+TextDendrite ..> DendriteType
+ImageDendrite ..> DendriteType
+MultimodalDendrite ..> DendriteType
 @enduml

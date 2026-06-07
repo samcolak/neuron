@@ -3,24 +3,68 @@ left to right direction
 skinparam packageStyle rectangle
 skinparam shadowing false
 skinparam monochrome true
-skinparam componentStyle rectangle
+skinparam classAttributeIconSize 0
 
-title neuralnet/src/cnn
+title neuralnet/src/cnn class structure
 
-package "src/cnn" {
-  artifact "classifier.rs" as classifier
-  artifact "feature_extractor.rs" as extractor
-  artifact "cnn_trainer.rs" as trainer
+package "cnn" {
+  enum CnnImageClassifierError {
+    InvalidConfiguration
+    TensorFailure
+    SnapshotFailure
+  }
+
+  enum CnnFeatureExtractorError {
+    UnsupportedImageShape
+    TensorFailure
+    InvalidConfiguration
+  }
+
+  class CnnImageClassifier {
+    - input_height: usize
+    - input_width: usize
+    - input_channels: usize
+    - class_labels: Vec<String>
+    - min_confidence: f32
+    + new(...): Result<CnnImageClassifier, CnnImageClassifierError>
+    + train_image(label: &str, image: &[u8]): Result<(), CnnImageClassifierError>
+    + predict_with_confidence(image: &[u8]): Result<Option<(String, f32)>, CnnImageClassifierError>
+    + train_labeled_image_batches(batches: &[CnnTrainerBatch]): TrainerBatchReport
+    + evaluate_labeled_images(samples: &[CnnEvaluationSample]): TrainerEvaluationReport
+  }
+
+  class CnnFeatureExtractor {
+    - target_height: usize
+    - target_width: usize
+    + new(target_height: usize, target_width: usize): CnnFeatureExtractor
+    + extract_feature_tokens(image: &[u8]): Result<Vec<String>, CnnFeatureExtractorError>
+  }
+
+  class CnnTrainerBatch {
+    + label: String
+    + samples: Vec<Vec<u8>>
+    + new(label: &str, samples: Vec<Vec<u8>>): CnnTrainerBatch
+  }
+
+  class CnnEvaluationSample {
+    + expected_label: String
+    + image: Vec<u8>
+    + new(expected_label: &str, image: Vec<u8>): CnnEvaluationSample
+  }
 }
 
-component "src/tensor" as tensor <<module>>
-component "src/training" as training <<module>>
-component "image crate" as image <<external>>
+class Tensor4D <<external>>
+class LinearHead <<external>>
+class TrainerBatchReport <<external>>
+class TrainerEvaluationReport <<external>>
 
-extractor --> tensor : adapters / tensor types
-extractor --> image : image decoding and resizing
-classifier --> tensor : tensor ops and shapes
-classifier --> training : linear head and metrics
-trainer --> classifier : train classifier
-trainer --> training : trainer / metrics utilities
+CnnImageClassifier ..> CnnImageClassifierError
+CnnFeatureExtractor ..> CnnFeatureExtractorError
+
+CnnImageClassifier ..> Tensor4D
+CnnImageClassifier ..> LinearHead
+CnnImageClassifier ..> CnnTrainerBatch
+CnnImageClassifier ..> CnnEvaluationSample
+CnnImageClassifier ..> TrainerBatchReport
+CnnImageClassifier ..> TrainerEvaluationReport
 @enduml

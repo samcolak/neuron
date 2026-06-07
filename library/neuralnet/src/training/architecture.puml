@@ -3,39 +3,109 @@ left to right direction
 skinparam packageStyle rectangle
 skinparam shadowing false
 skinparam monochrome true
-skinparam componentStyle rectangle
+skinparam classAttributeIconSize 0
 
-title neuralnet/src/training
+title neuralnet/src/training class structure
 
-package "src/training" {
-  artifact "dense_baseline.rs" as dense_baseline
-  artifact "linear_head.rs" as linear_head
-  artifact "metrics.rs" as metrics
-  artifact "trainer.rs" as trainer
-  artifact "training_loop.rs" as training_loop
+package "training" {
+  enum TrainerBridgeTarget
+  class TrainerBatch {
+    + label: String
+    + samples: Vec<MultiModalInput>
+    + new(label: &str, samples: Vec<MultiModalInput>): TrainerBatch
+  }
+
+  class TrainerBatchReport {
+    + total_examples: usize
+    + trained_examples: usize
+    + skipped_examples: usize
+    + per_label_counts: BTreeMap<String, usize>
+  }
+
+  class TrainerEvaluationSample {
+    + expected_label: String
+    + content: MultiModalInput
+    + new(expected_label: &str, content: MultiModalInput): TrainerEvaluationSample
+  }
+
+  class TrainerEvaluationReport {
+    + total_samples: usize
+    + evaluated_samples: usize
+    + correct_predictions: usize
+    + unknown_predictions: usize
+    + accuracy: f64
+  }
+
+  class LabelQualityMetrics {
+    + precision: f64
+    + recall: f64
+    + f1: f64
+    + support: usize
+  }
+
+  class TrainingLoopConfig {
+    + epochs: usize
+    + target: TrainerBridgeTarget
+    + dendrite_type: DendriteType
+    + early_stopping_patience: Option<usize>
+    + checkpoint_dir: Option<PathBuf>
+  }
+
+  class EpochTrainingSummary {
+    + epoch: usize
+    + trained_examples: usize
+    + validation_accuracy: f64
+  }
+
+  class TrainingLoopReport {
+    + epochs_ran: usize
+    + best_epoch: Option<usize>
+    + best_validation_accuracy: f64
+    + history: Vec<EpochTrainingSummary>
+  }
+
+  class DenseTokenBaseline {
+    + train_epoch(...): TrainerBatchReport
+    + evaluate_dataset(...): TrainerEvaluationReport
+  }
+
+  enum LinearHeadError
+
+  class LinearHead {
+    - input_dim: usize
+    - output_dim: usize
+    - learning_rate: f32
+    + new(input_dim: usize, output_dim: usize, learning_rate: f32): Result<LinearHead, LinearHeadError>
+    + predict_class(features: &[f32]): Result<usize, LinearHeadError>
+    + train_step(features: &[f32], target_class: usize): Result<f32, LinearHeadError>
+  }
 }
 
-component "src/core" as core <<module>>
-component "src/dendrites" as dendrites <<module>>
-component "src/helpers" as helpers <<module>>
+class MultiModalBrain <<external>>
+class SupervisedSample <<external>>
+interface TrainableModel <<external>>
+class NodeMetadata <<external>>
+class DendriteType <<external>>
+class MultiModalInput <<external>>
 
-trainer --> core : multimodal brain and node metadata
-trainer --> helpers : multimodal inputs
-trainer --> dendrites : label types
-trainer --> metrics : quality metrics
+TrainerBatch *-- MultiModalInput
+TrainerEvaluationSample *-- MultiModalInput
+TrainerEvaluationReport *-- LabelQualityMetrics
 
-training_loop --> core : model and brain abstractions
-training_loop --> dense_baseline : baseline trainer
-training_loop --> trainer : evaluation / reports
-training_loop --> helpers : multimodal inputs
-training_loop --> dendrites : label types
+TrainingLoopConfig ..> TrainerBridgeTarget
+TrainingLoopConfig ..> DendriteType
+TrainingLoopReport *-- EpochTrainingSummary
+TrainingLoopReport ..> TrainerEvaluationReport
 
-dense_baseline --> core : trainable model and node controller
-dense_baseline --> helpers : multimodal controller
-dense_baseline --> dendrites : label types
-dense_baseline --> metrics : evaluation helpers
-dense_baseline --> trainer : batch reports
+DenseTokenBaseline ..> TrainableModel
+DenseTokenBaseline ..> SupervisedSample
+DenseTokenBaseline ..> TrainerBatchReport
+DenseTokenBaseline ..> TrainerEvaluationReport
 
-metrics --> trainer : report structures
-linear_head --> core : standalone numeric utility
+MultiModalBrain ..> TrainerBatch
+MultiModalBrain ..> TrainerEvaluationSample
+MultiModalBrain ..> TrainerBatchReport
+MultiModalBrain ..> TrainerEvaluationReport
+
+LinearHead ..> LinearHeadError
 @enduml
