@@ -24,6 +24,10 @@ mod multimodal_tensor_variants_tests;
 
 fn main() {
     println!("Multimodal brain demo");
+    println!(
+        "Tensor backend in use: {}",
+        neuralnet::tensor::backend::active_backend_label()
+    );
     multimodal_demo::run_multimodal_demo();
     trainer_walkthrough::run_trainer_walkthrough();
     cnn_classifier_walkthrough::run_cnn_classifier_walkthrough();

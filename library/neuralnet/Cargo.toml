@@ -10,9 +10,10 @@ keywords = ["neural-networks", "machine-learning", "rust"]
 categories = ["science", "algorithms"]
 
 [features]
-default = []
+default = ["optimizer-adam"]
+optimizer-adam = []
 offloading-cuda = []
-offloading-mlx = []
+offloading-mlx = ["dep:apple-mlx"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -21,3 +22,4 @@ bincode = "1"
 uuid = { version = "1.22.0", features = ["serde", "v4", "v7", "fast-rng"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 csv = "1"
+apple-mlx = { version = "0.1.1", optional = true }

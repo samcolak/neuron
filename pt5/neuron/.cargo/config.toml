@@ -1,0 +1,4 @@
+[env]
+CMAKE_PREFIX_PATH = { value = ".local/apple-mlx", relative = true }
+MLX_DIR = { value = ".local/apple-mlx/share/cmake/MLX", relative = true }
+DYLD_LIBRARY_PATH = { value = ".local/apple-mlx/lib", relative = true }

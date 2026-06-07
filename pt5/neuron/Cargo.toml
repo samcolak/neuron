@@ -4,5 +4,11 @@ version = "0.1.0"
 edition = "2024"
 authors = ["Sam Colak <sam@samcolak.com>"]
 
+[features]
+default = []
+# uncomment this below for mlx (if you have an Mx Apple Device running Tahoe 25.xx+)
+# default = ["offloading-mlx"]
+offloading-mlx = ["neuralnet/offloading-mlx"]
+
 [dependencies]
 neuralnet = { path = "../../library/neuralnet" }

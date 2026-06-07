@@ -28,6 +28,80 @@ pub trait TensorBackend: Send + Sync {
     fn global_average_pool2d(&self, input: &Tensor4D) -> Result<Tensor4D, TensorError>;
 
     fn relu_inplace(&self, input: &mut Tensor4D);
+
+    #[allow(clippy::too_many_arguments)]
+    fn conv_relu_max_pool2d_valid(
+        &self,
+        input: &Tensor4D,
+        kernels: &Tensor4D,
+        bias: Option<&[f32]>,
+        conv_stride_h: usize,
+        conv_stride_w: usize,
+        pool_window_h: usize,
+        pool_window_w: usize,
+        pool_stride_h: usize,
+        pool_stride_w: usize,
+    ) -> Result<Tensor4D, TensorError> {
+        let mut conv = self.conv2d_valid(input, kernels, bias, conv_stride_h, conv_stride_w)?;
+        self.relu_inplace(&mut conv);
+        self.max_pool2d(
+            &conv,
+            pool_window_h,
+            pool_window_w,
+            pool_stride_h,
+            pool_stride_w,
+        )
+    }
+
+    /// Fused forward: conv→relu→pool (→ optional second block) → global average pool.
+    /// Returns the flat feature vector directly. Backends that support on-device
+    /// lazy evaluation (MLX) override this to avoid intermediate host round-trips.
+    /// `block2` is `Some((kernels, bias))` when a second conv block is present.
+    #[allow(clippy::too_many_arguments)]
+    fn conv_blocks_to_feature_vec(
+        &self,
+        input: &Tensor4D,
+        block1_kernels: &Tensor4D,
+        block1_bias: &[f32],
+        block2: Option<(&Tensor4D, &[f32])>,
+        conv_stride_h: usize,
+        conv_stride_w: usize,
+        pool_window_h: usize,
+        pool_window_w: usize,
+        pool_stride_h: usize,
+        pool_stride_w: usize,
+    ) -> Result<Vec<f32>, TensorError> {
+        let block1_out = self.conv_relu_max_pool2d_valid(
+            input,
+            block1_kernels,
+            Some(block1_bias),
+            conv_stride_h,
+            conv_stride_w,
+            pool_window_h,
+            pool_window_w,
+            pool_stride_h,
+            pool_stride_w,
+        )?;
+
+        let final_out = if let Some((k2, b2)) = block2 {
+            self.conv_relu_max_pool2d_valid(
+                &block1_out,
+                k2,
+                Some(b2),
+                conv_stride_h,
+                conv_stride_w,
+                pool_window_h,
+                pool_window_w,
+                pool_stride_h,
+                pool_stride_w,
+            )?
+        } else {
+            block1_out
+        };
+
+        let gap = self.global_average_pool2d(&final_out)?;
+        Ok(gap.flatten_batch_features().first().cloned().unwrap_or_default())
+    }
 }
 
 pub use cpu_backend::CpuTensorBackend;
@@ -76,6 +150,23 @@ pub fn active_backend() -> &'static dyn TensorBackend {
 
 pub fn active_backend_name() -> &'static str {
     active_backend().name()
+}
+
+pub fn active_backend_label() -> &'static str {
+    #[cfg(feature = "offloading-cuda")]
+    {
+        return "cuda";
+    }
+
+    #[cfg(all(not(feature = "offloading-cuda"), feature = "offloading-mlx"))]
+    {
+        return mlx_backend::mlx_backend_label();
+    }
+
+    #[cfg(all(not(feature = "offloading-cuda"), not(feature = "offloading-mlx")))]
+    {
+        "cpu"
+    }
 }
 
 #[cfg(test)]

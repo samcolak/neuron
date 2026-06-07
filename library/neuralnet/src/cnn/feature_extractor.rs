@@ -114,10 +114,16 @@ impl CnnFeatureExtractor {
             collapse_to_single_channel(&input)?
         };
 
-        let mut features = input.conv2d_valid(&self.kernels, Some(self.bias.as_slice()), 1, 1)?;
-        features.relu_inplace();
-
-        let pooled = features.max_pool2d(2, 2, 2, 2)?;
+        let pooled = input.conv_relu_max_pool2d_valid(
+            &self.kernels,
+            Some(self.bias.as_slice()),
+            1,
+            1,
+            2,
+            2,
+            2,
+            2,
+        )?;
         let mut tokens = quantize_channels(&pooled)?;
 
         let global_pooled = pooled.global_average_pool2d()?;
@@ -256,5 +262,18 @@ mod tests {
             .unwrap_or_else(|_| panic!("extractor should produce tokens for rgb square image"));
 
         assert!(!tokens.is_empty());
+    }
+
+    #[test]
+    fn extractor_tokens_remain_stable_on_fused_path() {
+        let extractor = CnnFeatureExtractor::new(16, 16);
+        let image = vec![64u8; 64];
+
+        let tokens = extractor
+            .extract_feature_tokens(image.as_slice())
+            .unwrap_or_else(|_| panic!("extractor should produce stable fused tokens"));
+
+        assert!(!tokens.is_empty());
+        assert!(tokens.iter().any(|token| token.starts_with("g")));
     }
 }

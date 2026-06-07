@@ -286,6 +286,57 @@ impl Tensor4D {
         backend.conv2d_valid(self, kernels, bias, stride_h, stride_w)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn conv_relu_max_pool2d_valid(
+        &self,
+        kernels: &Self,
+        bias: Option<&[f32]>,
+        conv_stride_h: usize,
+        conv_stride_w: usize,
+        pool_window_h: usize,
+        pool_window_w: usize,
+        pool_stride_h: usize,
+        pool_stride_w: usize,
+    ) -> Result<Self, TensorError> {
+        self.conv_relu_max_pool2d_valid_with_backend(
+            active_backend(),
+            kernels,
+            bias,
+            conv_stride_h,
+            conv_stride_w,
+            pool_window_h,
+            pool_window_w,
+            pool_stride_h,
+            pool_stride_w,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn conv_relu_max_pool2d_valid_with_backend<B: TensorBackend + ?Sized>(
+        &self,
+        backend: &B,
+        kernels: &Self,
+        bias: Option<&[f32]>,
+        conv_stride_h: usize,
+        conv_stride_w: usize,
+        pool_window_h: usize,
+        pool_window_w: usize,
+        pool_stride_h: usize,
+        pool_stride_w: usize,
+    ) -> Result<Self, TensorError> {
+        backend.conv_relu_max_pool2d_valid(
+            self,
+            kernels,
+            bias,
+            conv_stride_h,
+            conv_stride_w,
+            pool_window_h,
+            pool_window_w,
+            pool_stride_h,
+            pool_stride_w,
+        )
+    }
+
     pub fn max_pool2d(
         &self,
         window_h: usize,

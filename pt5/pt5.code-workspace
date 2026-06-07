@@ -15,7 +15,9 @@
       "cargo clippy": true,
       "java": true,
       "cargo check": true,
-      "cargo test": true
+      "cargo test": true,
+      "cargo info": true,
+      "git ls-remote": true
     }
   }
 }

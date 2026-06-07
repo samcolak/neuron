@@ -12,7 +12,7 @@ use crate::tensor::adapters::{
     TensorAdapterError,
 };
 use crate::tensor::tensor4d::{Tensor4D, TensorError};
-use crate::training::linear_head::{LinearHead, LinearHeadError};
+use crate::training::linear_head::{LinearHead, LinearHeadError, LinearOptimizer};
 
 const CNN_CLASSIFIER_BIN_MAGIC: [u8; 4] = *b"CNN1";
 
@@ -330,9 +330,89 @@ impl CnnImageClassifier {
         self.min_confidence
     }
 
+    pub fn set_head_optimizer(&mut self, optimizer: LinearOptimizer) {
+        self.head.set_optimizer(optimizer);
+    }
+
+    pub fn head_optimizer(&self) -> LinearOptimizer {
+        self.head.optimizer()
+    }
+
+    pub fn head_learning_rate(&self) -> f32 {
+        self.head.learning_rate()
+    }
+
+    pub fn set_head_weight_decay(&mut self, weight_decay: f32) {
+        self.head.set_weight_decay(weight_decay);
+    }
+
+    #[cfg(feature = "optimizer-adam")]
+    pub fn configure_head_adam(&mut self, beta1: f32, beta2: f32, epsilon: f32) {
+        self.head.configure_adam(beta1, beta2, epsilon);
+    }
+
     pub fn extract_features(&self, image_bytes: &[u8]) -> Result<Vec<f32>, CnnImageClassifierError> {
-        let (features, _cache) = self.forward_with_cache(image_bytes)?;
-        Ok(features)
+        self.forward_for_inference(image_bytes)
+    }
+
+    fn forward_for_inference(
+        &self,
+        image_bytes: &[u8],
+    ) -> Result<Vec<f32>, CnnImageClassifierError> {
+        let (in_height, in_width, in_channels) = infer_square_dimensions_and_channels(image_bytes).ok_or(
+            CnnImageClassifierError::UnsupportedImageShape {
+                byte_len: image_bytes.len(),
+            },
+        )?;
+
+        if in_channels != self.input_channels {
+            return Err(CnnImageClassifierError::InputChannelMismatch {
+                expected: self.input_channels,
+                actual: in_channels,
+            });
+        }
+
+        let input = image_bytes_to_tensor_nchw_resized_with_channels(
+            image_bytes,
+            in_height,
+            in_width,
+            in_channels,
+            self.input_height,
+            self.input_width,
+            true,
+        )?;
+
+        let block1_output = input.conv_relu_max_pool2d_valid(
+            &self.conv1_kernels,
+            Some(self.conv1_bias.as_slice()),
+            1,
+            1,
+            2,
+            2,
+            2,
+            2,
+        )?;
+
+        let final_output = if let (Some(conv2_kernels), Some(conv2_bias)) =
+            (&self.conv2_kernels, &self.conv2_bias)
+        {
+            block1_output.conv_relu_max_pool2d_valid(
+                conv2_kernels,
+                Some(conv2_bias.as_slice()),
+                1,
+                1,
+                2,
+                2,
+                2,
+                2,
+            )?
+        } else {
+            block1_output
+        };
+
+        let global = final_output.global_average_pool2d()?;
+        let flat = global.flatten_batch_features();
+        Ok(flat.first().cloned().unwrap_or_default())
     }
 
     fn forward_with_cache(
@@ -1427,5 +1507,32 @@ mod tests {
         assert_eq!(before_dog, after_dog);
 
         cleanup_classifier_test_dir(test_name);
+    }
+
+    #[test]
+    fn cnn_classifier_inference_path_matches_cached_forward_features() {
+        let classifier = CnnImageClassifier::new_two_layer(
+            vec!["animal_cat".to_string(), "animal_dog".to_string()],
+            16,
+            16,
+            4,
+            4,
+            0.15,
+        )
+        .unwrap_or_else(|_| panic!("two-layer classifier should initialize"));
+
+        let image = vertical_stripes_image_8x8();
+        let (cached_features, _) = classifier
+            .forward_with_cache(image.as_slice())
+            .unwrap_or_else(|_| panic!("cached forward should succeed"));
+        let inference_features = classifier
+            .forward_for_inference(image.as_slice())
+            .unwrap_or_else(|_| panic!("inference forward should succeed"));
+
+        // Allow small floating-point difference from fused path vs chained ops.
+        assert_eq!(cached_features.len(), inference_features.len());
+        for (a, b) in cached_features.iter().zip(inference_features.iter()) {
+            assert!((a - b).abs() < 1e-4, "feature mismatch: {a} vs {b}");
+        }
     }
 }

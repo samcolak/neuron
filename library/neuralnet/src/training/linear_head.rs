@@ -2,6 +2,13 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use serde::{Deserialize, Serialize};
 
+use crate::training::optimizers::OptimizerState;
+
+fn default_optimizer() -> LinearOptimizer {
+    LinearOptimizer::Sgd
+}
+pub use crate::training::optimizers::types::LinearOptimizer;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinearHeadError {
     InvalidDimensions {
@@ -71,6 +78,14 @@ pub struct LinearHead {
     learning_rate: f32,
     weights: Vec<f32>,
     bias: Vec<f32>,
+    #[serde(default = "default_optimizer")]
+    optimizer: LinearOptimizer,
+    #[serde(default)]
+    weight_decay: f32,
+    #[serde(default)]
+    weight_optimizer_state: OptimizerState,
+    #[serde(default)]
+    bias_optimizer_state: OptimizerState,
 }
 
 impl LinearHead {
@@ -103,11 +118,41 @@ impl LinearHead {
             learning_rate: learning_rate.max(0.0),
             weights,
             bias: vec![0.0; output_dim],
+            optimizer: LinearOptimizer::Sgd,
+            weight_decay: 0.0,
+            weight_optimizer_state: OptimizerState::from_kind(LinearOptimizer::Sgd),
+            bias_optimizer_state: OptimizerState::from_kind(LinearOptimizer::Sgd),
         })
     }
 
     pub fn dimensions(&self) -> (usize, usize) {
         (self.input_dim, self.output_dim)
+    }
+
+    pub fn optimizer(&self) -> LinearOptimizer {
+        self.optimizer
+    }
+
+    pub fn learning_rate(&self) -> f32 {
+        self.learning_rate
+    }
+
+    pub fn set_optimizer(&mut self, optimizer: LinearOptimizer) {
+        self.optimizer = optimizer;
+        self.weight_optimizer_state = OptimizerState::from_kind(optimizer);
+        self.bias_optimizer_state = OptimizerState::from_kind(optimizer);
+    }
+
+    pub fn set_weight_decay(&mut self, weight_decay: f32) {
+        self.weight_decay = weight_decay.max(0.0);
+    }
+
+    #[cfg(feature = "optimizer-adam")]
+    pub fn configure_adam(&mut self, beta1: f32, beta2: f32, epsilon: f32) {
+        self.weight_optimizer_state
+            .configure_adam(beta1, beta2, epsilon);
+        self.bias_optimizer_state
+            .configure_adam(beta1, beta2, epsilon);
     }
 
     pub fn logits(&self, features: &[f32]) -> Result<Vec<f32>, LinearHeadError> {
@@ -184,14 +229,18 @@ impl LinearHead {
             *grad = accum;
         }
 
+        let mut weight_grad = vec![0.0f32; self.weights.len()];
+        let mut bias_grad = vec![0.0f32; self.bias.len()];
         for (out, delta) in probs.iter().enumerate() {
             let row_offset = out * self.input_dim;
             for (in_idx, feature) in features.iter().enumerate() {
                 let grad = *delta * *feature;
-                self.weights[row_offset + in_idx] -= self.learning_rate * grad;
+                weight_grad[row_offset + in_idx] += grad;
             }
-            self.bias[out] -= self.learning_rate * *delta;
+            bias_grad[out] += *delta;
         }
+
+        self.apply_gradients(weight_grad.as_slice(), bias_grad.as_slice(), 1.0);
 
         Ok((loss, input_grad))
     }
@@ -261,15 +310,47 @@ impl LinearHead {
         }
 
         let scale = 1.0 / batch_size;
-        for (weight, grad) in self.weights.iter_mut().zip(weight_grad.iter()) {
-            *weight -= self.learning_rate * (*grad * scale);
-        }
-
-        for (bias, grad) in self.bias.iter_mut().zip(bias_grad.iter()) {
-            *bias -= self.learning_rate * (*grad * scale);
-        }
+        self.apply_gradients(weight_grad.as_slice(), bias_grad.as_slice(), scale);
 
         Ok((total_loss * scale, input_grads))
+    }
+
+    fn synchronize_optimizer_state(&mut self) {
+        if self.weight_optimizer_state.kind() != self.optimizer {
+            self.weight_optimizer_state = OptimizerState::from_kind(self.optimizer);
+        }
+        if self.bias_optimizer_state.kind() != self.optimizer {
+            self.bias_optimizer_state = OptimizerState::from_kind(self.optimizer);
+        }
+    }
+
+    fn apply_gradients(&mut self, weight_grad: &[f32], bias_grad: &[f32], scale: f32) {
+        self.synchronize_optimizer_state();
+
+        let mut scaled_weight_grad = vec![0.0f32; weight_grad.len()];
+        let mut scaled_bias_grad = vec![0.0f32; bias_grad.len()];
+
+        for (dst, src) in scaled_weight_grad.iter_mut().zip(weight_grad.iter()) {
+            *dst = *src * scale;
+        }
+
+        for (dst, src) in scaled_bias_grad.iter_mut().zip(bias_grad.iter()) {
+            *dst = *src * scale;
+        }
+
+        self.weight_optimizer_state.apply(
+            self.weights.as_mut_slice(),
+            scaled_weight_grad.as_slice(),
+            self.learning_rate,
+            self.weight_decay,
+        );
+
+        self.bias_optimizer_state.apply(
+            self.bias.as_mut_slice(),
+            scaled_bias_grad.as_slice(),
+            self.learning_rate,
+            0.0,
+        );
     }
 }
 
@@ -403,5 +484,32 @@ mod tests {
         assert_eq!(grads[0].len(), 3);
         assert_eq!(grads[1].len(), 3);
         assert!(grads.iter().flatten().all(|value| value.is_finite()));
+    }
+
+    #[cfg(feature = "optimizer-adam")]
+    #[test]
+    fn linear_head_adam_optimizer_reduces_loss_on_repeated_example() {
+        let mut head = LinearHead::new(4, 2, 0.05)
+            .unwrap_or_else(|_| panic!("linear head should initialize"));
+        head.set_optimizer(LinearOptimizer::Adam);
+        let features = [1.0, 1.0, 0.0, 0.0];
+
+        let initial = head
+            .train_step(&features, 0)
+            .unwrap_or_else(|_| panic!("first training step should succeed"));
+
+        let mut final_loss = initial;
+        for _ in 0..80 {
+            final_loss = head
+                .train_step(&features, 0)
+                .unwrap_or_else(|_| panic!("repeated training step should succeed"));
+        }
+
+        assert!(final_loss < initial);
+        assert_eq!(
+            head.predict_class(&features)
+                .unwrap_or_else(|_| panic!("prediction should succeed")),
+            0
+        );
     }
 }
