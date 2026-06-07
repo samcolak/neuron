@@ -69,6 +69,9 @@ struct LargeBenchmarkSummary {
     feature_extract_samples_per_sec: f64,
     train_throughput_samples_per_sec: f64,
     epoch_elapsed_ms: f64,
+    transform_ms: f64,
+    update_ms: f64,
+    flush_ms: f64,
     eval_micro_f1: f64,
 }
 
@@ -475,6 +478,9 @@ fn collect_large_benchmark_summary() -> LargeBenchmarkSummary {
         feature_extract_samples_per_sec: bench_images.len() as f64 / feature_elapsed.max(1e-9),
         train_throughput_samples_per_sec: scale_report.throughput_samples_per_sec,
         epoch_elapsed_ms: scale_report.elapsed_ms as f64,
+        transform_ms: scale_report.transform_elapsed_ms as f64,
+        update_ms: scale_report.update_elapsed_ms as f64,
+        flush_ms: scale_report.flush_elapsed_ms as f64,
         eval_micro_f1: eval_report.micro_f1,
     }
 }
@@ -708,6 +714,12 @@ pub fn run_cnn_classifier_walkthrough() {
         large_benchmark.train_throughput_samples_per_sec,
         large_benchmark.epoch_elapsed_ms,
         large_benchmark.eval_micro_f1,
+    );
+    println!(
+        "    timing breakdown ms: transform={:.1} update={:.1} flush={:.1}",
+        large_benchmark.transform_ms,
+        large_benchmark.update_ms,
+        large_benchmark.flush_ms,
     );
 
     let _ = diagonal_gradient_image_8x8();

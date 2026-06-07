@@ -178,7 +178,7 @@ struct ForwardCache {
 struct ConvBlockBackward {
     kernel_grad: Tensor4D,
     bias_grad: Vec<f32>,
-    input_grad: Tensor4D,
+    input_grad: Option<Tensor4D>,
 }
 
 impl CnnImageClassifier {
@@ -543,7 +543,12 @@ impl CnnImageClassifier {
                 )?;
 
                 let block2_backward =
-                    backward_conv_block_gradients(&conv2_snapshot, block2_cache, &block2_pooled_grad)?;
+                    backward_conv_block_gradients(
+                        &conv2_snapshot,
+                        block2_cache,
+                        &block2_pooled_grad,
+                        true,
+                    )?;
 
                 conv2_kernel_grad_accum.add_inplace(&block2_backward.kernel_grad)?;
                 add_bias_grad(
@@ -551,17 +556,24 @@ impl CnnImageClassifier {
                     block2_backward.bias_grad.as_slice(),
                 )?;
 
-                if block2_backward.input_grad.shape() != cache.block1.pooled_shape {
+                let block2_input_grad = block2_backward.input_grad.as_ref().ok_or(
+                    CnnImageClassifierError::InvalidConfiguration(
+                        "second convolution block gradient is missing pooled input gradient",
+                    ),
+                )?;
+
+                if block2_input_grad.shape() != cache.block1.pooled_shape {
                     return Err(CnnImageClassifierError::GradientTensorShapeMismatch {
                         expected: cache.block1.pooled_shape,
-                        actual: block2_backward.input_grad.shape(),
+                        actual: block2_input_grad.shape(),
                     });
                 }
 
                 let block1_backward = backward_conv_block_gradients(
                     &conv1_snapshot,
                     &cache.block1,
-                    &block2_backward.input_grad,
+                    block2_input_grad,
+                    false,
                 )?;
 
                 conv1_kernel_grad_accum.add_inplace(&block1_backward.kernel_grad)?;
@@ -590,6 +602,7 @@ impl CnnImageClassifier {
                     &conv1_snapshot,
                     &cache.block1,
                     &block1_pooled_grad,
+                    false,
                 )?;
 
                 conv1_kernel_grad_accum.add_inplace(&block1_backward.kernel_grad)?;
@@ -858,6 +871,7 @@ impl CnnImageClassifier {
                 block2_cache,
                 &block2_pooled_grad,
                 effective_learning_rate,
+                true,
             )?;
 
             if grad_to_block1_pooled.shape() != cache.block1.pooled_shape {
@@ -873,6 +887,7 @@ impl CnnImageClassifier {
                 &cache.block1,
                 &grad_to_block1_pooled,
                 effective_learning_rate,
+                false,
             )?;
 
             return Ok(());
@@ -886,6 +901,7 @@ impl CnnImageClassifier {
             &cache.block1,
             &block1_pooled_grad,
             effective_learning_rate,
+            false,
         )?;
         Ok(())
     }
@@ -943,15 +959,16 @@ fn forward_conv_block(
     relu.relu_inplace();
 
     let (pooled, pool_indices) = max_pool2d_with_indices(&relu, 2, 2, 2, 2)?;
+    let pooled_shape = pooled.shape();
 
     Ok((
-        pooled.clone(),
+        pooled,
         ConvBlockCache {
             input: input.clone(),
             conv_pre_activation: conv_pre,
             relu_output: relu,
             pool_indices,
-            pooled_shape: pooled.shape(),
+            pooled_shape,
         },
     ))
 }
@@ -990,8 +1007,9 @@ fn backward_conv_block(
     cache: &ConvBlockCache,
     pooled_grad: &Tensor4D,
     learning_rate: f32,
+    compute_input_grad: bool,
 ) -> Result<Tensor4D, CnnImageClassifierError> {
-    let backward = backward_conv_block_gradients(kernels, cache, pooled_grad)?;
+    let backward = backward_conv_block_gradients(kernels, cache, pooled_grad, compute_input_grad)?;
     apply_conv_gradients_single(
         kernels,
         bias,
@@ -1001,13 +1019,14 @@ fn backward_conv_block(
         1.0,
     )?;
 
-    Ok(backward.input_grad)
+    Ok(backward.input_grad.unwrap_or_else(|| Tensor4D::zeros(0, 0, 0, 0)))
 }
 
 fn backward_conv_block_gradients(
     kernels: &Tensor4D,
     cache: &ConvBlockCache,
     pooled_grad: &Tensor4D,
+    compute_input_grad: bool,
 ) -> Result<ConvBlockBackward, CnnImageClassifierError> {
     let pooled_shape = pooled_grad.shape();
     if pooled_shape != cache.pooled_shape {
@@ -1020,28 +1039,31 @@ fn backward_conv_block_gradients(
     let (_, channels, pooled_h, pooled_w) = cache.pooled_shape;
     let (_, _, relu_h, relu_w) = cache.relu_output.shape();
 
-    let mut relu_grad = Tensor4D::zeros(1, channels, relu_h, relu_w);
+    let mut conv_grad = Tensor4D::zeros(1, channels, relu_h, relu_w);
+    let relu_plane = relu_h * relu_w;
+    let pooled_plane = pooled_h * pooled_w;
+
     for channel in 0..channels {
+        let conv_channel_base = channel * relu_plane;
+        let pooled_channel_base = channel * pooled_plane;
+
         for py in 0..pooled_h {
             for px in 0..pooled_w {
-                let pooled_idx = ((channel * pooled_h) + py) * pooled_w + px;
+                let pooled_idx = pooled_channel_base + py * pooled_w + px;
                 let (src_y, src_x) = cache.pool_indices[pooled_idx];
-                let existing = relu_grad.get(0, channel, src_y, src_x)?;
-                let delta = pooled_grad.get(0, channel, py, px)?;
-                relu_grad.set(0, channel, src_y, src_x, existing + delta)?;
+                let conv_idx = conv_channel_base + src_y * relu_w + src_x;
+                conv_grad.as_mut_slice()[conv_idx] += pooled_grad.as_slice()[pooled_idx];
             }
         }
     }
 
-    let mut conv_grad = relu_grad.clone();
-    for channel in 0..channels {
-        for y in 0..relu_h {
-            for x in 0..relu_w {
-                let pre = cache.conv_pre_activation.get(0, channel, y, x)?;
-                if pre <= 0.0 {
-                    conv_grad.set(0, channel, y, x, 0.0)?;
-                }
-            }
+    for (grad, pre) in conv_grad
+        .as_mut_slice()
+        .iter_mut()
+        .zip(cache.conv_pre_activation.as_slice().iter())
+    {
+        if *pre <= 0.0 {
+            *grad = 0.0;
         }
     }
 
@@ -1050,66 +1072,80 @@ fn backward_conv_block_gradients(
 
     let mut kernel_grad = Tensor4D::zeros(channels, in_channels, kernel_h, kernel_w);
     let mut bias_grad = vec![0.0f32; channels];
+    let conv_plane = conv_h * conv_w;
+    let (_, _, in_h, in_w) = cache.input.shape();
+    let input_plane = in_h * in_w;
+    let kernel_plane = kernel_h * kernel_w;
 
     for (out_c, bias_slot) in bias_grad.iter_mut().enumerate() {
-        let mut bias_acc = 0.0f32;
-        for oy in 0..conv_h {
-            for ox in 0..conv_w {
-                bias_acc += conv_grad.get(0, out_c, oy, ox)?;
-            }
-        }
-        *bias_slot = bias_acc;
+        let conv_channel_base = out_c * conv_plane;
+        let conv_channel = &conv_grad.as_slice()[conv_channel_base..conv_channel_base + conv_plane];
+        *bias_slot = conv_channel.iter().copied().sum();
 
         for in_c in 0..in_channels {
+            let input_channel_base = in_c * input_plane;
+            let kernel_channel_base = (out_c * in_channels + in_c) * kernel_plane;
             for ky in 0..kernel_h {
                 for kx in 0..kernel_w {
                     let mut accum = 0.0f32;
                     for oy in 0..conv_h {
+                        let conv_row_base = conv_channel_base + oy * conv_w;
+                        let input_row_base = input_channel_base + (oy + ky) * in_w + kx;
                         for ox in 0..conv_w {
-                            let grad = conv_grad.get(0, out_c, oy, ox)?;
-                            let inp = cache.input.get(0, in_c, oy + ky, ox + kx)?;
+                            let grad = conv_grad.as_slice()[conv_row_base + ox];
+                            let inp = cache.input.as_slice()[input_row_base + ox];
                             accum += grad * inp;
                         }
                     }
-                    kernel_grad.set(out_c, in_c, ky, kx, accum)?;
+                    kernel_grad.as_mut_slice()[kernel_channel_base + ky * kernel_w + kx] = accum;
                 }
             }
         }
     }
 
-    let (_, _, in_h, in_w) = cache.input.shape();
-    let mut input_grad = Tensor4D::zeros(1, in_channels, in_h, in_w);
-    for in_c in 0..in_channels {
-        for iy in 0..in_h {
-            for ix in 0..in_w {
-                let mut accum = 0.0f32;
-                for out_c in 0..channels {
-                    for ky in 0..kernel_h {
-                        if iy < ky {
-                            continue;
-                        }
-                        let oy = iy - ky;
-                        if oy >= conv_h {
-                            continue;
-                        }
-                        for kx in 0..kernel_w {
-                            if ix < kx {
+    let input_grad = if compute_input_grad {
+        let mut input_grad = Tensor4D::zeros(1, in_channels, in_h, in_w);
+
+        for in_c in 0..in_channels {
+            let input_channel_base = in_c * input_plane;
+            for iy in 0..in_h {
+                for ix in 0..in_w {
+                    let mut accum = 0.0f32;
+                    for out_c in 0..channels {
+                        let conv_channel_base = out_c * conv_plane;
+                        let kernel_channel_base = (out_c * in_channels + in_c) * kernel_plane;
+                        for ky in 0..kernel_h {
+                            if iy < ky {
                                 continue;
                             }
-                            let ox = ix - kx;
-                            if ox >= conv_w {
+                            let oy = iy - ky;
+                            if oy >= conv_h {
                                 continue;
                             }
-                            let grad = conv_grad.get(0, out_c, oy, ox)?;
-                            let weight = kernels.get(out_c, in_c, ky, kx)?;
-                            accum += grad * weight;
+                            let conv_row_base = conv_channel_base + oy * conv_w;
+                            for kx in 0..kernel_w {
+                                if ix < kx {
+                                    continue;
+                                }
+                                let ox = ix - kx;
+                                if ox >= conv_w {
+                                    continue;
+                                }
+                                let grad = conv_grad.as_slice()[conv_row_base + ox];
+                                let weight = kernels.as_slice()[kernel_channel_base + ky * kernel_w + kx];
+                                accum += grad * weight;
+                            }
                         }
                     }
+                    input_grad.as_mut_slice()[input_channel_base + iy * in_w + ix] = accum;
                 }
-                input_grad.set(0, in_c, iy, ix, accum)?;
             }
         }
-    }
+
+        Some(input_grad)
+    } else {
+        None
+    };
 
     Ok(ConvBlockBackward {
         kernel_grad,
@@ -1184,20 +1220,15 @@ fn apply_conv_gradients_single(
 
     let (out_channels, in_channels, kernel_h, kernel_w) = kernels.shape();
     let scale = if batch_size > 0.0 { 1.0 / batch_size } else { 1.0 };
+    let kernel_plane = kernel_h * kernel_w;
 
     for out_c in 0..out_channels {
         for in_c in 0..in_channels {
+            let kernel_channel_base = (out_c * in_channels + in_c) * kernel_plane;
             for ky in 0..kernel_h {
                 for kx in 0..kernel_w {
-                    let current = kernels.get(out_c, in_c, ky, kx)?;
-                    let grad = kernel_grad.get(out_c, in_c, ky, kx)?;
-                    kernels.set(
-                        out_c,
-                        in_c,
-                        ky,
-                        kx,
-                        current - learning_rate * grad * scale,
-                    )?;
+                    let idx = kernel_channel_base + ky * kernel_w + kx;
+                    kernels.as_mut_slice()[idx] -= learning_rate * kernel_grad.as_slice()[idx] * scale;
                 }
             }
         }
@@ -1236,19 +1267,29 @@ fn max_pool2d_with_indices(
     let mut pooled = Tensor4D::zeros(n, c, out_h, out_w);
     let mut indices = vec![(0usize, 0usize); c * out_h * out_w];
 
+    let input_channel_stride = h * w;
+    let output_channel_stride = out_h * out_w;
+
     for channel in 0..c {
+        let input_channel_base = channel * input_channel_stride;
+        let output_channel_base = channel * output_channel_stride;
+
         for oy in 0..out_h {
             let in_y = oy * stride_h;
+            let output_row_base = output_channel_base + oy * out_w;
+
             for ox in 0..out_w {
                 let in_x = ox * stride_w;
                 let mut max_value = f32::NEG_INFINITY;
                 let mut max_idx = (in_y, in_x);
 
                 for wy in 0..window_h {
-                    for wx in 0..window_w {
+                    let row_base = input_channel_base + (in_y + wy) * w + in_x;
+                    let row = &input.as_slice()[row_base..row_base + window_w];
+
+                    for (wx, value) in row.iter().copied().enumerate() {
                         let src_y = in_y + wy;
                         let src_x = in_x + wx;
-                        let value = input.get(0, channel, src_y, src_x)?;
                         if value > max_value {
                             max_value = value;
                             max_idx = (src_y, src_x);
@@ -1256,7 +1297,7 @@ fn max_pool2d_with_indices(
                     }
                 }
 
-                pooled.set(0, channel, oy, ox, max_value)?;
+                pooled.as_mut_slice()[output_row_base + ox] = max_value;
                 let idx = ((channel * out_h) + oy) * out_w + ox;
                 indices[idx] = max_idx;
             }

@@ -76,13 +76,13 @@ pub struct CnnScaleTrainReport {
     pub accumulation_steps: usize,
     pub effective_batch_size: usize,
     pub optimizer_steps: usize,
-    pub elapsed_ms: u128,
+    pub elapsed_ms: f64,
     pub throughput_samples_per_sec: f64,
     pub max_inflight_samples: usize,
     pub max_inflight_bytes: usize,
-    pub transform_elapsed_ms: u128,
-    pub update_elapsed_ms: u128,
-    pub flush_elapsed_ms: u128,
+    pub transform_elapsed_ms: f64,
+    pub update_elapsed_ms: f64,
+    pub flush_elapsed_ms: f64,
 }
 
 fn pop_prefix(samples: &mut Vec<Vec<u8>>, prefix_len: usize) -> Vec<Vec<u8>> {
@@ -126,9 +126,9 @@ impl CnnImageClassifier {
         let mut max_inflight_bytes = 0usize;
         let mut inflight_samples = 0usize;
         let mut inflight_bytes = 0usize;
-        let mut transform_elapsed_ms = 0u128;
-        let mut update_elapsed_ms = 0u128;
-        let mut flush_elapsed_ms = 0u128;
+        let mut transform_elapsed_ms = 0.0f64;
+        let mut update_elapsed_ms = 0.0f64;
+        let mut flush_elapsed_ms = 0.0f64;
         let mut pending_by_label: BTreeMap<String, Vec<Vec<u8>>> = BTreeMap::new();
 
         for batch in data_loader.epoch_batches(epoch) {
@@ -146,7 +146,7 @@ impl CnnImageClassifier {
                     &mut rng,
                     PipelineMode::Train,
                 );
-                transform_elapsed_ms += transform_start.elapsed().as_millis();
+                transform_elapsed_ms += transform_start.elapsed().as_secs_f64() * 1000.0;
                 let transformed_len = transformed.len();
 
                 let should_flush = {
@@ -186,7 +186,7 @@ impl CnnImageClassifier {
                             .or_insert(0) += train_count;
                         optimizer_steps += 1;
                     }
-                    update_elapsed_ms += update_start.elapsed().as_millis();
+                    update_elapsed_ms += update_start.elapsed().as_secs_f64() * 1000.0;
                 }
             }
 
@@ -206,13 +206,13 @@ impl CnnImageClassifier {
                     *report.per_label_counts.entry(label.clone()).or_insert(0) += train_count;
                     optimizer_steps += 1;
                 }
-                flush_elapsed_ms += flush_start.elapsed().as_millis();
+                flush_elapsed_ms += flush_start.elapsed().as_secs_f64() * 1000.0;
             }
         }
 
         report.skipped_examples = report.total_examples.saturating_sub(report.trained_examples);
-        let elapsed_ms = start.elapsed().as_millis();
-        let elapsed_secs = (elapsed_ms as f64 / 1000.0).max(1e-9);
+        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let elapsed_secs = (elapsed_ms / 1000.0).max(1e-9);
 
         CnnScaleTrainReport {
             train_report: report,

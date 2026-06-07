@@ -246,26 +246,50 @@ impl Tensor4D {
         let out_w = ((self.w - kernels.w) / stride_w) + 1;
         let mut output = Tensor4D::zeros(self.n, kernels.n, out_h, out_w);
 
-        // For each output position, accumulate input patch * kernel weights across channels.
+        let input_channel_stride = self.h * self.w;
+        let input_batch_stride = self.c * input_channel_stride;
+        let kernel_channel_stride = kernels.h * kernels.w;
+        let kernel_out_stride = kernels.c * kernel_channel_stride;
+        let output_channel_stride = out_h * out_w;
+        let output_batch_stride = kernels.n * output_channel_stride;
+        let bias_values = bias.unwrap_or(&[]);
 
         for batch in 0..self.n {
+            let input_batch_base = batch * input_batch_stride;
+            let output_batch_base = batch * output_batch_stride;
+
             for out_c in 0..kernels.n {
-                let bias_value = bias.and_then(|b| b.get(out_c)).copied().unwrap_or(0.0);
+                let bias_value = bias_values.get(out_c).copied().unwrap_or(0.0);
+                let kernel_out_base = out_c * kernel_out_stride;
+                let output_channel_base = output_batch_base + out_c * output_channel_stride;
+
                 for out_y in 0..out_h {
                     let in_y = out_y * stride_h;
+                    let output_row_base = output_channel_base + out_y * out_w;
+
                     for out_x in 0..out_w {
                         let in_x = out_x * stride_w;
                         let mut acc = bias_value;
+
                         for in_c in 0..self.c {
+                            let input_channel_base = input_batch_base + in_c * input_channel_stride;
+                            let kernel_channel_base = kernel_out_base + in_c * kernel_channel_stride;
+
                             for ky in 0..kernels.h {
-                                for kx in 0..kernels.w {
-                                    let input_value = self.get(batch, in_c, in_y + ky, in_x + kx)?;
-                                    let kernel_value = kernels.get(out_c, in_c, ky, kx)?;
-                                    acc += input_value * kernel_value;
+                                let input_row_base = input_channel_base + (in_y + ky) * self.w + in_x;
+                                let kernel_row_base = kernel_channel_base + ky * kernels.w;
+                                let input_row = &self.data[input_row_base..input_row_base + kernels.w];
+                                let kernel_row = &kernels.data[kernel_row_base..kernel_row_base + kernels.w];
+
+                                for (input_value, kernel_value) in
+                                    input_row.iter().zip(kernel_row.iter())
+                                {
+                                    acc += *input_value * *kernel_value;
                                 }
                             }
                         }
-                        output.set(batch, out_c, out_y, out_x, acc)?;
+
+                        output.data[output_row_base + out_x] = acc;
                     }
                 }
             }
@@ -372,22 +396,39 @@ impl Tensor4D {
         let out_w = ((self.w - window_w) / stride_w) + 1;
         let mut output = Tensor4D::zeros(self.n, self.c, out_h, out_w);
 
+        let input_channel_stride = self.h * self.w;
+        let input_batch_stride = self.c * input_channel_stride;
+        let output_channel_stride = out_h * out_w;
+        let output_batch_stride = self.c * output_channel_stride;
+
         for batch in 0..self.n {
+            let input_batch_base = batch * input_batch_stride;
+            let output_batch_base = batch * output_batch_stride;
+
             for channel in 0..self.c {
+                let input_channel_base = input_batch_base + channel * input_channel_stride;
+                let output_channel_base = output_batch_base + channel * output_channel_stride;
+
                 for out_y in 0..out_h {
                     let in_y = out_y * stride_h;
+                    let output_row_base = output_channel_base + out_y * out_w;
+
                     for out_x in 0..out_w {
                         let in_x = out_x * stride_w;
                         let mut max_value = f32::NEG_INFINITY;
+
                         for wy in 0..window_h {
-                            for wx in 0..window_w {
-                                let value = self.get(batch, channel, in_y + wy, in_x + wx)?;
+                            let input_row_base = input_channel_base + (in_y + wy) * self.w + in_x;
+                            let input_row = &self.data[input_row_base..input_row_base + window_w];
+
+                            for value in input_row.iter().copied() {
                                 if value > max_value {
                                     max_value = value;
                                 }
                             }
                         }
-                        output.set(batch, channel, out_y, out_x, max_value)?;
+
+                        output.data[output_row_base + out_x] = max_value;
                     }
                 }
             }
@@ -419,19 +460,17 @@ impl Tensor4D {
         }
 
         let mut output = Tensor4D::zeros(self.n, self.c, 1, 1);
+        let spatial_area = self.h * self.w;
+        let batch_stride = self.c * spatial_area;
 
         for batch in 0..self.n {
+            let batch_base = batch * batch_stride;
             for channel in 0..self.c {
-                let mut sum = 0.0f32;
-
-                for y in 0..self.h {
-                    for x in 0..self.w {
-                        sum += self.get(batch, channel, y, x)?;
-                    }
-                }
-
-                let denom = (self.h * self.w) as f32;
-                output.set(batch, channel, 0, 0, sum / denom)?;
+                let channel_base = batch_base + channel * spatial_area;
+                let channel_slice = &self.data[channel_base..channel_base + spatial_area];
+                let sum: f32 = channel_slice.iter().copied().sum();
+                let denom = spatial_area as f32;
+                output.data[batch * self.c + channel] = sum / denom;
             }
         }
 
