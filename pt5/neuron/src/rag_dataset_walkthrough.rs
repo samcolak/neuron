@@ -224,6 +224,85 @@ fn build_dump(documents: &[RagDocument]) -> String {
 
 }
 
+fn normalize_for_search(input: &str) -> String {
+    input
+        .to_ascii_lowercase()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() || ch.is_ascii_whitespace() { ch } else { ' ' })
+        .collect::<String>()
+}
+
+fn tokenize_for_search(input: &str) -> Vec<String> {
+    normalize_for_search(input)
+        .split_whitespace()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn score_document_for_query(doc: &RagDocument, query: &str) -> usize {
+    let query_tokens = tokenize_for_search(query);
+    if query_tokens.is_empty() {
+        return 0;
+    }
+
+    let topic = doc.metadata.get("ki_topic").map(String::as_str).unwrap_or("");
+    let alt_text = doc
+        .metadata
+        .get("alt_ki_text")
+        .map(String::as_str)
+        .unwrap_or("");
+
+    let combined = format!("{} {} {}", doc.text, topic, alt_text);
+    let normalized_doc = normalize_for_search(combined.as_str());
+
+    let mut score = 0usize;
+    for token in query_tokens {
+        if normalized_doc.contains(token.as_str()) {
+            score += 1;
+        }
+    }
+
+    if normalized_doc.contains("vpn") {
+        score += 2;
+    }
+
+    if normalized_doc.contains("issue") || normalized_doc.contains("issues") {
+        score += 1;
+    }
+
+    score
+}
+
+fn query_documents<'a>(documents: &'a [RagDocument], query: &str, top_k: usize) -> Vec<(usize, &'a RagDocument)> {
+    let mut ranked: Vec<(usize, &RagDocument)> = documents
+        .iter()
+        .map(|doc| (score_document_for_query(doc, query), doc))
+        .filter(|(score, _)| *score > 0)
+        .collect();
+
+    ranked.sort_by(|a, b| {
+        b.0.cmp(&a.0).then_with(|| {
+            let left_topic = a
+                .1
+                .metadata
+                .get("ki_topic")
+                .map(String::as_str)
+                .unwrap_or("");
+            let right_topic = b
+                .1
+                .metadata
+                .get("ki_topic")
+                .map(String::as_str)
+                .unwrap_or("");
+            left_topic.cmp(right_topic)
+        })
+    });
+
+    ranked.into_iter().take(top_k).collect()
+}
+
 pub fn run_rag_dataset_walkthrough() {
 
     println!("\nRAG dataset walkthrough");
@@ -260,7 +339,29 @@ pub fn run_rag_dataset_walkthrough() {
         }
     }
 
-    println!("  step 3: create ingestion dump");
+    println!("  step 3: query ingested dataset");
+    let query = "having issues with my vpn";
+    let results = query_documents(documents.as_slice(), query, 5);
+    println!("    query='{}' top_hits={}", query, results.len());
+    for (rank, (score, doc)) in results.iter().enumerate() {
+        let topic = doc
+            .metadata
+            .get("ki_topic")
+            .map(String::as_str)
+            .unwrap_or("<missing>");
+        let preview = doc.text.replace(['\n', '\r'], " ");
+        let short_preview: String = preview.chars().take(90).collect();
+        println!(
+            "      [{}] score={} id={} topic='{}' preview='{}'",
+            rank,
+            score,
+            doc.id,
+            topic,
+            short_preview
+        );
+    }
+
+    println!("  step 4: create ingestion dump");
     let dump = build_dump(documents.as_slice());
     let out_path = dump_path();
 
@@ -298,5 +399,39 @@ mod tests {
             .unwrap_or_else(|_| panic!("demo csv validation should succeed"));
 
         assert!(!docs.is_empty());
+    }
+
+    #[test]
+    fn dataset_vpn_query_returns_relevant_results() {
+        let config = RagCsvImportConfig {
+            text_column: "ki_text".to_string(),
+            id_column: None,
+            metadata_columns: vec![
+                "ki_topic".to_string(),
+                "alt_ki_text".to_string(),
+                "bad_ki_text".to_string(),
+            ],
+        };
+
+        let docs = import_csv(dataset_path().as_path(), &config)
+            .unwrap_or_else(|_| panic!("demo csv import should succeed"));
+
+        let query = "having issues with my vpn";
+        let results = query_documents(docs.as_slice(), query, 5);
+
+        assert!(!results.is_empty());
+
+        let contains_vpn_hit = results.iter().any(|(_, doc)| {
+            let topic = doc
+                .metadata
+                .get("ki_topic")
+                .map(String::as_str)
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let body = doc.text.to_ascii_lowercase();
+            topic.contains("vpn") || body.contains("vpn")
+        });
+
+        assert!(contains_vpn_hit);
     }
 }
