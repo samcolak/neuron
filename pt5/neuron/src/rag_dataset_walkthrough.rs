@@ -92,18 +92,18 @@ fn build_dump(documents: &[RagDocument]) -> String {
             empty_text_count += 1;
         }
 
-        if let Some(alt_text) = doc.metadata.get("alt_ki_text") {
-            if !alt_text.trim().is_empty() {
-                present_alt_count += 1;
-                total_alt_chars += alt_text.chars().count();
-            }
+        if let Some(alt_text) = doc.metadata.get("alt_ki_text")
+            && !alt_text.trim().is_empty()
+        {
+            present_alt_count += 1;
+            total_alt_chars += alt_text.chars().count();
         }
 
-        if let Some(bad_text) = doc.metadata.get("bad_ki_text") {
-            if !bad_text.trim().is_empty() {
-                present_bad_count += 1;
-                total_bad_chars += bad_text.chars().count();
-            }
+        if let Some(bad_text) = doc.metadata.get("bad_ki_text")
+            && !bad_text.trim().is_empty()
+        {
+            present_bad_count += 1;
+            total_bad_chars += bad_text.chars().count();
         }
 
         let seen = seen_ids.entry(doc.id.clone()).or_insert(0);
@@ -189,7 +189,7 @@ fn build_dump(documents: &[RagDocument]) -> String {
             .map(String::as_str)
             .unwrap_or("");
 
-        let normalize = |s: &str| s.replace('\n', " ").replace('\r', " ");
+        let normalize = |s: &str| s.replace(['\n', '\r'], " ");
 
         lines.push(format!("  [{}]", idx));
         lines.push(format!("    id='{}'", doc.id));
