@@ -1,145 +1,76 @@
+# neuralnet
 
-# Neural Network (RUST) Library
+neuralnet is a Rust-native machine learning library for multimodal experimentation and production-minded model pipelines.
 
-Built without any dependancies on existing Neural Network foundation models or libraries via 3rd parties
-Do not use this (YET) in operational code - alot of changes forthcoming (and optimizations)
+It is built for teams that want practical model performance, strict control over execution behavior, and predictable deployment ergonomics across CPU and accelerator-backed environments.
 
-This is not intented for production environments (YET).
+## Why this library is valuable
 
-Distributed under GPL-3.0 License - Please observe the license (in the root) - All derived works MUST remain open source for the community
+- Strong performance baseline on CPU with optional accelerator offloading paths.
+- Unified tensor backend abstraction with centralized runtime backend selection and fallback policy.
+- Practical CNN training and inference utilities that support batched and coalesced workflows.
+- Multimodal model interfaces that combine image and text oriented paths in one crate.
+- Snapshot and checkpoint support for repeatable training and recovery workflows.
+- Rust ownership and type safety benefits for long-running training services.
 
-NB. Whilst i am not a qualified / certified mathematician, alot of work on Tensors uses mathematical models etc - If you find an error, please inform me asap !! Many thanks
+## Core benefits in practice
 
-Written by Samuel Colak (sam@samcolak.com)
+### 1) Faster iteration from one codebase
 
-## What Changed
+The same model and training code can run on CPU-first setups and accelerator-capable setups using the backend abstraction layer. This reduces environment-specific branching in trainer logic and keeps experimentation loops tight.
 
-- Pattern classifier + trainer bridge
-- Training loop with checkpoint lifecycle (epoch, best, last, resume)
-- Tensor foundation (`Tensor4D`) with CNN primitives
-- CNN feature extractor for image-to-feature token conversion
-- Batch image training/evaluation with confusion matrix + micro metrics
-- App walkthrough integration for the CNN image path
-- Support for CUDA (Not implemented YET!), MLX (Implemented) and CPU (Implemented) offloading of tensor models
+### 2) Better production control
 
-## Project Layout
+Backend selection is centralized and policy-driven, so availability and fallback are managed in one place rather than spread across training code.
 
-- `/library/neuralnet/`: core library (brain, training, tensors, integration tests)
-- `/pt5/neuron/`: runnable app walkthrough and demo harness
+### 3) Throughput-focused inference paths
 
-Parts 1-4 are evolutions in the library... This is intended as the primary stable instance
+The CNN pipeline includes batch-oriented prediction APIs and coalescing scheduler patterns designed to improve request throughput and reduce overhead from small request bursts.
 
-## Run And Test
+### 4) Enterprise-friendly operational behavior
 
-From the repository root (`pt5`):
+The library includes checkpointing and snapshot flows so model state can be persisted and restored cleanly during iterative training and deployment rollouts.
 
-```bash
-cd /library/neuralnet && cargo test
-```
+## Feature highlights
 
-```bash
-cd /pt5/neuron && cargo test
-```
+- Tensor backend abstraction across CPU, CUDA, and MLX-capable implementations.
+- CNN classifier and trainer APIs for supervised image workflows.
+- Multimodal core modules for broader experiments beyond pure image classification.
+- Training utilities and metrics for evaluating model quality trends.
+- Optional Adam optimizer support enabled by default.
 
-```bash
-cd /pt5/neuron && cargo run --quiet
-```
+## Backend and runtime strategy
 
-## App Walkthrough (Trainer)
+- CPU is always available and acts as the reliability baseline.
+- Optional accelerator backends are enabled through Cargo features.
+- Runtime backend preference can be set through environment variables:
+	- NEURALNET_TENSOR_BACKEND
+	- NEURALNET_BACKEND
+- Accepted backend values:
+	- cpu
+	- cuda
+	- mlx
+	- auto
+- Fallback order is centralized:
+	- cuda -> mlx -> cpu
 
-The trainer walkthrough is in `/pt5/neuron/src/trainer_walkthrough.rs` and now includes six steps.
+This design keeps trainer/core code simpler while making backend expansion safer as new kernels are introduced.
 
-- Step 1: single labeled training sample
-- Step 2: batch training
-- Step 3: evaluation + confusion matrix + macro/micro metrics
-- Step 4: supervised training loop with early stopping/checkpoints
-- Step 5: resume from best checkpoint
-- Step 6: CNN image path demo on app pipeline
+## Versioning guidance
 
-## App Walkthrough (Standalone CNN Classifier)
+- Keep the source directory name stable as neuralnet.
+- Bump the crate version in Cargo.toml when publishing releases.
+- Use git tags to mark released versions.
+- If multiple versions need to coexist locally, use separate checkouts or git worktrees.
 
-The standalone trainable image-classifier walkthrough is in `/pt5/neuron/src/cnn_classifier_walkthrough.rs`.
+## Current state
 
-It validates:
+- Package name: neuralnet
+- Crate version: 0.1.0
 
-- pre-train probe behavior (strict confidence threshold -> unknown)
-- repeated batch training on synthetic image patterns
-- post-train probe behavior
-- confusion matrix + label metrics using the CNN trainer adapter
+## MLX offloading notes
 
-## Step 6: CNN Image Path Demo
-
-Step 6 enables the optional CNN image feature path on a fresh `MultiModalBrain`:
-
-- Calls `enable_default_cnn_image_path()`
-- Trains on synthetic 8x8 grayscale image patterns
-- Evaluates with confusion matrix and micro-F1
-- Shows pre-train vs post-train probe behavior
-
-Expected behavior in output:
-
-- `pre-train image probe -> <unknown>`
-- `cnn image final eval: accuracy=... micro_f1=...`
-- confusion matrix rows for `animal_cat`, `animal_dog`, and unknown image bucket
-- `post-train image probe -> animal_cat (...)`
-
-## CNN Classifier Validation
-
-Use these focused commands when validating the standalone trainable image classifier path:
-
-```bash
-cd neuralnet && cargo test cnn_classifier -- --nocapture
-```
-
-```bash
-cd neuralnet && cargo test cnn_classifier_snapshot_round_trip_preserves_predictions -- --nocapture
-```
-
-```bash
-cd neuralnet && cargo test cnn_trainer -- --nocapture
-```
-
-```bash
-cd neuralnet && cargo test linear_head -- --nocapture
-```
-
-Use these broader commands for full regression confidence:
-
-```bash
-cd neuralnet && cargo test
-```
-
-```bash
-cd neuron && cargo test cnn_classifier_walkthrough -- --nocapture
-```
-
-```bash
-cd neuron && cargo run --quiet
-```
-
-Expected validation signals:
-
-- Core classifier tests pass (simple pattern learning + invalid image rejection).
-- CNN classifier snapshot round-trip test passes (save/load preserves predictions).
-- Trainer adapter tests pass (batch counts, confusion matrix wiring, confidence-threshold behavior, loss-trend behavior).
-- Linear head tests pass (probability normalization, input-gradient shape, loss decrease).
-- App walkthrough prints pre-train unknown and post-train labeled prediction for the cat probe.
-- App walkthrough prints confusion matrix and label metrics for the CNN classifier flow.
-
-## Key Files
-
-- `/library/neuralnet/src/tensor/tensor4d.rs`: tensor structure + `conv2d_valid` + `max_pool2d`
-- `/library/neuralnet/src/cnn/feature_extractor.rs`: CNN feature extraction for images
-- `/library/neuralnet/src/cnn/classifier.rs`: trainable CNN image classifier backed by `LinearHead`, including save/load snapshot lifecycle and optional two-layer conv backbone (`new_two_layer`)
-- `/library/neuralnet/src/core/brain.rs`: optional classifier preprocessing hook for image CNN path
-- `/library/neuralnet/src/cnn/cnn_trainer.rs`: image trainer adapter that emits standard training reports/metrics
-- `/library/neuralnet/src/training/trainer.rs`: training/evaluation + confusion matrix + macro/micro metrics
-- `/library/neuralnet/src/core/integration.rs`: supervised pipeline + integration tests
-- `/library/neuron/src/trainer_fixtures.rs`: app walkthrough fixtures, including CNN image samples
-- `/library/neuron/src/trainer_walkthrough.rs`: app-side walkthrough and CNN step
-- `/library/neuron/src/cnn_classifier_walkthrough.rs`: dedicated standalone CNN classifier walkthrough
-
-## Current Baseline
-
-- `/library/neuralnet`: all tests passing
-- `/pt5/neuron`: all tests passing
+- offloading-mlx uses the repo-local vendor/apple-mlx override.
+- The vendored override skips the stale mlx/c/fft.cpp wrapper for compatibility with current Homebrew MLX headers.
+- The repo does not ship MLX runtime binaries.
+- To use offloading-mlx, link an external MLX prefix via APPLE_MLX_PREFIX, MLX_DIR, CMAKE_PREFIX_PATH, or a symlink at vendor/apple-mlx/.linked/mlx-prefix.
