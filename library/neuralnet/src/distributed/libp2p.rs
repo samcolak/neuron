@@ -478,10 +478,7 @@ impl Libp2pTransport {
         peer: &RemotePeerDescriptor,
         message: DistributedTransportMessage,
     ) -> Result<DistributedTransportMessage, DistributedTensorError> {
-        debug_log(format!(
-            "network send requested target_peer={} message_id={}",
-            peer.peer_id, message.message_id
-        ));
+        debug_log(format!("network send peer={}", peer.peer_id));
         let (response_tx, response_rx) = mpsc::channel();
         self.network_tx
             .send(NetworkCommand::Send(Box::new(NetworkSendCommand {
@@ -680,10 +677,7 @@ impl Libp2pTransport {
                                             .behaviour_mut()
                                             .request_response
                                             .send_request(&peer_id, message);
-                                        debug_log(format!(
-                                            "outbound request queued peer_id={} request_id={:?}",
-                                            peer_id, request_id
-                                        ));
+                                        debug_log(format!("outbound request peer={}", peer_id));
                                         pending_responses.insert(request_id, response_tx);
                                     }
                                     NetworkCommand::Discover { response_tx } => {
@@ -799,10 +793,8 @@ impl Libp2pTransport {
                                                             peer
                                                         );
                                                         debug_log(format!(
-                                                            "inbound request peer_id={} message_id={} swarm={}",
-                                                            peer,
-                                                            request.message_id,
-                                                            config.swarm_identifier()
+                                                            "inbound request peer={}",
+                                                            peer
                                                         ));
                                                         let source = RemotePeerDescriptor {
                                                             peer_id: peer.to_string(),
@@ -838,10 +830,7 @@ impl Libp2pTransport {
                                                                 );
                                                     }
                                                     request_response::Message::Response { request_id, response } => {
-                                                        debug_log(format!(
-                                                            "inbound response request_id={:?}",
-                                                            request_id
-                                                        ));
+                                                        debug_log(format!("inbound response request_id={:?}", request_id));
                                                         if let Some(tx) = pending_responses.remove(&request_id) {
                                                             let _ = tx.send(Ok(response));
                                                         }

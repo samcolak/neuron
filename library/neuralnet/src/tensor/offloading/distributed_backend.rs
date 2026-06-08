@@ -363,10 +363,8 @@ fn execute_distributed_job(job: DistributedTensorJob) -> Result<DistributedTenso
         ).into_boxed_str())))?;
 
     eprintln!(
-        "[distributed][client] resolved target peer={} platform={} transport={}",
-        target_peer.peer_id,
-        target_peer.platform,
-        target_peer.transport
+        "[distributed][client] target peer={}",
+        target_peer.peer_id
     );
 
     executor
@@ -408,9 +406,7 @@ fn resolve_distributed_target_peer(
     }
 
     if candidates.is_empty() {
-        eprintln!(
-            "[distributed][client] no remote peers discovered yet; waiting for mDNS/bootstrap discovery"
-        );
+        eprintln!("[distributed][client] waiting for peer discovery");
         return Err("no remote peers discovered; set NEURALNET_DISTRIBUTED_BOOTSTRAP_PEERS or wait for mDNS discovery".to_string());
     }
 
