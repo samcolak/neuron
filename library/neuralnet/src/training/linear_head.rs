@@ -225,8 +225,32 @@ impl LinearHead {
         features: &[f32],
         target_class: usize,
     ) -> Result<f32, LinearHeadError> {
-        let (loss, _input_grad) = self.train_step_with_input_gradient(features, target_class)?;
+
+        validate_features(features, self.input_dim)?;
+        validate_target(target_class, self.output_dim)?;
+
+        self.ensure_scratch_initialized();
+        Self::compute_logits_into(&self.weights, &self.bias, self.input_dim, features, &mut self.scratch_logits);
+        softmax_into(&self.scratch_logits, &mut self.scratch_probs);
+
+        let target_prob = self.scratch_probs[target_class].max(1e-9);
+        let loss = -target_prob.ln();
+
+        self.scratch_probs[target_class] -= 1.0;
+
+        self.scratch_weight_grad.fill(0.0);
+        self.scratch_bias_grad.fill(0.0);
+        for (out, delta) in self.scratch_probs.iter().enumerate() {
+            let row_offset = out * self.input_dim;
+            for (in_idx, feature) in features.iter().enumerate() {
+                self.scratch_weight_grad[row_offset + in_idx] += *delta * *feature;
+            }
+            self.scratch_bias_grad[out] += *delta;
+        }
+
+        self.apply_gradients_from_scratch(1.0);
         Ok(loss)
+
     }
 
     pub fn train_step_with_input_gradient(
@@ -234,11 +258,13 @@ impl LinearHead {
         features: &[f32],
         target_class: usize,
     ) -> Result<(f32, Vec<f32>), LinearHeadError> {
+
         validate_features(features, self.input_dim)?;
         validate_target(target_class, self.output_dim)?;
+
         self.ensure_scratch_initialized();
         Self::compute_logits_into(&self.weights, &self.bias, self.input_dim, features, &mut self.scratch_logits);
-        softmax_into(&self.scratch_logits.clone(), &mut self.scratch_probs);
+        softmax_into(&self.scratch_logits, &mut self.scratch_probs);
 
         let target_prob = self.scratch_probs[target_class].max(1e-9);
         let loss = -target_prob.ln();
@@ -267,6 +293,7 @@ impl LinearHead {
         self.apply_gradients_from_scratch(1.0);
 
         Ok((loss, self.scratch_input_grad.clone()))
+
     }
 
     pub fn train_batch(
@@ -274,9 +301,51 @@ impl LinearHead {
         feature_batch: &[Vec<f32>],
         target_classes: &[usize],
     ) -> Result<f32, LinearHeadError> {
-        let (loss, _input_grads) =
-            self.train_batch_with_input_gradients(feature_batch, target_classes)?;
-        Ok(loss)
+
+        if feature_batch.is_empty() {
+            return Err(LinearHeadError::EmptyBatch);
+        }
+        if feature_batch.len() != target_classes.len() {
+            return Err(LinearHeadError::BatchSizeMismatch {
+                feature_count: feature_batch.len(),
+                target_count: target_classes.len(),
+            });
+        }
+
+        for (features, target) in feature_batch.iter().zip(target_classes.iter()) {
+            validate_features(features.as_slice(), self.input_dim)?;
+            validate_target(*target, self.output_dim)?;
+        }
+
+        let batch_size = feature_batch.len() as f32;
+        let mut total_loss = 0.0f32;
+        self.ensure_scratch_initialized();
+        self.scratch_weight_grad.fill(0.0);
+        self.scratch_bias_grad.fill(0.0);
+
+        for (features, target) in feature_batch.iter().zip(target_classes.iter()) {
+            Self::compute_logits_into(&self.weights, &self.bias, self.input_dim, features.as_slice(), &mut self.scratch_logits);
+            softmax_into(&self.scratch_logits, &mut self.scratch_probs);
+
+            let target_prob = self.scratch_probs[*target].max(1e-9);
+            total_loss += -target_prob.ln();
+
+            self.scratch_probs[*target] -= 1.0;
+
+            for (out, delta) in self.scratch_probs.iter().enumerate() {
+                let row_offset = out * self.input_dim;
+                for (in_idx, feature) in features.iter().enumerate() {
+                    self.scratch_weight_grad[row_offset + in_idx] += *delta * *feature;
+                }
+                self.scratch_bias_grad[out] += *delta;
+            }
+        }
+
+        let scale = 1.0 / batch_size;
+        self.apply_gradients_from_scratch(scale);
+
+        Ok(total_loss * scale)
+
     }
 
     pub fn train_batch_with_input_gradients(
@@ -284,6 +353,7 @@ impl LinearHead {
         feature_batch: &[Vec<f32>],
         target_classes: &[usize],
     ) -> Result<(f32, Vec<Vec<f32>>), LinearHeadError> {
+
         if feature_batch.is_empty() {
             return Err(LinearHeadError::EmptyBatch);
         }
@@ -307,8 +377,9 @@ impl LinearHead {
         let mut input_grads: Vec<Vec<f32>> = Vec::with_capacity(feature_batch.len());
 
         for (features, target) in feature_batch.iter().zip(target_classes.iter()) {
+
             Self::compute_logits_into(&self.weights, &self.bias, self.input_dim, features.as_slice(), &mut self.scratch_logits);
-            softmax_into(&self.scratch_logits.clone(), &mut self.scratch_probs);
+            softmax_into(&self.scratch_logits, &mut self.scratch_probs);
 
             let target_prob = self.scratch_probs[*target].max(1e-9);
             total_loss += -target_prob.ln();
@@ -332,12 +403,14 @@ impl LinearHead {
                 }
                 self.scratch_bias_grad[out] += *delta;
             }
+            
         }
 
         let scale = 1.0 / batch_size;
         self.apply_gradients_from_scratch(scale);
 
         Ok((total_loss * scale, input_grads))
+
     }
 
     fn synchronize_optimizer_state(&mut self) {
@@ -352,31 +425,41 @@ impl LinearHead {
     /// Ensures scratch buffers are the correct size after deserialisation,
     /// where serde(skip) leaves them as empty Vecs.
     fn ensure_scratch_initialized(&mut self) {
+
         let weight_len = self.output_dim * self.input_dim;
+
         if self.scratch_logits.len() != self.output_dim {
             self.scratch_logits.resize(self.output_dim, 0.0);
         }
+
         if self.scratch_probs.len() != self.output_dim {
             self.scratch_probs.resize(self.output_dim, 0.0);
         }
+
         if self.scratch_weight_grad.len() != weight_len {
             self.scratch_weight_grad.resize(weight_len, 0.0);
         }
+
         if self.scratch_bias_grad.len() != self.output_dim {
             self.scratch_bias_grad.resize(self.output_dim, 0.0);
         }
+
         if self.scratch_input_grad.len() != self.input_dim {
             self.scratch_input_grad.resize(self.input_dim, 0.0);
         }
+
         if self.scratch_scaled_weight_grad.len() != weight_len {
             self.scratch_scaled_weight_grad.resize(weight_len, 0.0);
         }
+
         if self.scratch_scaled_bias_grad.len() != self.output_dim {
             self.scratch_scaled_bias_grad.resize(self.output_dim, 0.0);
         }
+
     }
 
     fn apply_gradients(&mut self, weight_grad: &[f32], bias_grad: &[f32], scale: f32) {
+
         self.synchronize_optimizer_state();
 
         self.scratch_scaled_weight_grad.resize(weight_grad.len(), 0.0);
@@ -401,11 +484,13 @@ impl LinearHead {
             self.learning_rate,
             0.0,
         );
+
     }
 
     /// Variant used by train_step/train_batch — reads directly from scratch_weight_grad
     /// and scratch_bias_grad, avoiding a redundant borrow of self.
     fn apply_gradients_from_scratch(&mut self, scale: f32) {
+
         self.synchronize_optimizer_state();
 
         self.scratch_scaled_weight_grad.resize(self.scratch_weight_grad.len(), 0.0);
@@ -430,7 +515,9 @@ impl LinearHead {
             self.learning_rate,
             0.0,
         );
+
     }
+
 }
 
 fn validate_features(features: &[f32], expected_len: usize) -> Result<(), LinearHeadError> {
@@ -456,6 +543,7 @@ fn validate_target(target_class: usize, class_count: usize) -> Result<(), Linear
 }
 
 fn softmax(logits: &[f32]) -> Vec<f32> {
+
     if logits.is_empty() {
         return Vec::new();
     }
@@ -474,10 +562,12 @@ fn softmax(logits: &[f32]) -> Vec<f32> {
     }
 
     exps.into_iter().map(|value| value / denom).collect()
+
 }
 
 /// In-place softmax — writes into an existing buffer to avoid allocation on hot paths.
 fn softmax_into(logits: &[f32], out: &mut Vec<f32>) {
+
     out.resize(logits.len(), 0.0);
 
     if logits.is_empty() {
@@ -500,6 +590,7 @@ fn softmax_into(logits: &[f32], out: &mut Vec<f32>) {
             *v /= denom;
         }
     }
+
 }
 
 #[cfg(test)]

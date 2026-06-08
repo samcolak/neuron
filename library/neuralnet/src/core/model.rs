@@ -29,6 +29,7 @@ impl SupervisedSample {
 }
 
 pub trait TrainableModel {
+
     fn train_epoch(
         &mut self,
         samples: &[SupervisedSample],
@@ -42,9 +43,11 @@ pub trait TrainableModel {
     fn save_checkpoint(&self, checkpoint_id: &str, dir: &Path) -> io::Result<Vec<PathBuf>>;
 
     fn load_checkpoint(&mut self, checkpoint_id: &str, dir: &Path) -> io::Result<()>;
+
 }
 
 impl TrainableModel for MultiModalBrain {
+
     fn train_epoch(
         &mut self,
         samples: &[SupervisedSample],
@@ -87,11 +90,15 @@ impl TrainableModel for MultiModalBrain {
 
         report.skipped_examples = report.total_examples.saturating_sub(report.trained_examples);
         report
+
     }
 
     fn evaluate_dataset(&self, samples: &[SupervisedSample]) -> TrainerEvaluationReport {
+
         if samples.is_empty() {
+            
             TrainerEvaluationReport::default()
+
         } else {
             let mut report = TrainerEvaluationReport {
                 total_samples: samples.len(),
@@ -146,7 +153,9 @@ impl TrainableModel for MultiModalBrain {
 
             compute_quality_metrics(&mut report);
             report
+        
         }
+
     }
 
     fn save_checkpoint(&self, checkpoint_id: &str, dir: &Path) -> io::Result<Vec<PathBuf>> {
@@ -156,6 +165,7 @@ impl TrainableModel for MultiModalBrain {
     }
 
     fn load_checkpoint(&mut self, checkpoint_id: &str, dir: &Path) -> io::Result<()> {
+
         let status = self.load_snapshot_instance_in_dir(checkpoint_id, dir)?;
 
         match (
@@ -181,7 +191,9 @@ impl TrainableModel for MultiModalBrain {
                 ),
             )),
         }
+
     }
+    
 }
 
 fn increment_confusion_count_borrowed(

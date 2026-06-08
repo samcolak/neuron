@@ -918,6 +918,59 @@ impl CnnImageClassifier {
         
     }
 
+    fn forward_batch_features_from_tensor(
+        &self,
+        input: &Tensor4D,
+    ) -> Result<Vec<Vec<f32>>, CnnImageClassifierError> {
+        let (n, c, h, w) = input.shape();
+        if n == 0
+            || c != self.input_channels
+            || h != self.input_height
+            || w != self.input_width
+        {
+            return Err(CnnImageClassifierError::InvalidConfiguration(
+                "forward batch input tensor shape mismatch",
+            ));
+        }
+
+        #[cfg(feature = "offloading-mlx")]
+        let block1_mlx = if active_backend().name() == "mlx" {
+            self.conv1.mlx_mirror_views()
+        } else {
+            None
+        };
+
+        #[cfg(not(feature = "offloading-mlx"))]
+        let block1_mlx = None;
+
+        let block1_output = if let Some((kernels, kernels_shape, bias)) = block1_mlx {
+            forward_conv_block_with_mlx_mirror_no_cache(input, kernels, kernels_shape, bias)?
+        } else {
+            forward_conv_block_no_cache(input, self.conv1.kernels(), self.conv1.bias())?
+        };
+
+        #[cfg(feature = "offloading-mlx")]
+        let block2_mlx = if active_backend().name() == "mlx" {
+            self.conv2.as_ref().and_then(|conv2| conv2.mlx_mirror_views())
+        } else {
+            None
+        };
+
+        #[cfg(not(feature = "offloading-mlx"))]
+        let block2_mlx = None;
+
+        let final_output = if let Some((kernels, kernels_shape, bias)) = block2_mlx {
+            forward_conv_block_with_mlx_mirror_no_cache(&block1_output, kernels, kernels_shape, bias)?
+        } else if let Some(conv2) = self.conv2.as_ref() {
+            forward_conv_block_no_cache(&block1_output, conv2.kernels(), conv2.bias())?
+        } else {
+            block1_output
+        };
+
+        let global = final_output.global_average_pool2d()?;
+        Ok(global.flatten_batch_features())
+    }
+
     pub fn train_image(&mut self, label: &str, image_bytes: &[u8]) -> Result<f32, CnnImageClassifierError> {
 
         let normalized = label.trim().to_ascii_lowercase();
@@ -1276,7 +1329,7 @@ impl CnnImageClassifier {
                 preprocess_elapsed_sec += preprocess_start.elapsed().as_secs_f64();
 
                 let model_start = Instant::now();
-                let (feature_batch, _cache) = self.forward_batch_with_cache_from_tensor(&batch_inputs)?;
+                let feature_batch = self.forward_batch_features_from_tensor(&batch_inputs)?;
                 for features in feature_batch {
                     predictions.push(self.classify_feature_vector(features.as_slice())?);
                 }
@@ -1674,6 +1727,17 @@ fn forward_conv_block(
 
 }
 
+fn forward_conv_block_no_cache(
+    input: &Tensor4D,
+    kernels: &Tensor4D,
+    bias: &[f32],
+) -> Result<Tensor4D, CnnImageClassifierError> {
+    let mut conv = input.conv2d_valid(kernels, Some(bias), 1, 1)?;
+    conv.relu_inplace();
+    let (pooled, _pool_indices) = max_pool2d_with_indices(&conv, 2, 2, 2, 2)?;
+    Ok(pooled)
+}
+
 #[cfg(feature = "offloading-mlx")]
 fn forward_conv_block_with_mlx_mirror(
     input: &Tensor4D,
@@ -1696,6 +1760,31 @@ fn forward_conv_block_with_mlx_mirror(
             pool_indices,
             pooled_shape,
         },
+    ))
+}
+
+#[cfg(feature = "offloading-mlx")]
+fn forward_conv_block_with_mlx_mirror_no_cache(
+    input: &Tensor4D,
+    kernels: &crate::tensor::offloading::mlx_backend::MlxOwnedArray,
+    kernels_shape: (usize, usize, usize, usize),
+    bias: &crate::tensor::offloading::mlx_backend::MlxOwnedArray,
+) -> Result<Tensor4D, CnnImageClassifierError> {
+    let mut conv = mlx_conv2d_valid_with_mirrored_params(input, kernels, kernels_shape, bias, 1, 1)?;
+    conv.relu_inplace();
+    let (pooled, _pool_indices) = max_pool2d_with_indices(&conv, 2, 2, 2, 2)?;
+    Ok(pooled)
+}
+
+#[cfg(not(feature = "offloading-mlx"))]
+fn forward_conv_block_with_mlx_mirror_no_cache(
+    _input: &Tensor4D,
+    _kernels: &(),
+    _kernels_shape: (usize, usize, usize, usize),
+    _bias: &(),
+) -> Result<Tensor4D, CnnImageClassifierError> {
+    Err(CnnImageClassifierError::InvalidConfiguration(
+        "mlx mirror path requires offloading-mlx feature",
     ))
 }
 

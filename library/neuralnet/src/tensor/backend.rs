@@ -12,6 +12,7 @@ pub enum TensorBackendKind {
 }
 
 impl TensorBackendKind {
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Cpu => "cpu",
@@ -29,6 +30,7 @@ impl TensorBackendKind {
             _ => None,
         }
     }
+
 }
 
 #[derive(Clone, Copy)]
@@ -38,6 +40,7 @@ struct ActiveBackendSelection {
 }
 
 pub trait TensorBackend: Send + Sync {
+
     fn name(&self) -> &'static str;
 
     fn training_capabilities(&self) -> BackendTrainingCapabilities {
@@ -886,4 +889,5 @@ mod tests {
     fn active_backend_defaults_to_cpu_without_offloading_features() {
         assert_eq!(active_backend_name(), "cpu");
     }
+    
 }
