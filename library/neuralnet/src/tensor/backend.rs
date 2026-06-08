@@ -2,6 +2,8 @@ use std::env;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
+#[cfg(feature = "backend-distributed")]
+use crate::tensor::offloading::distributed_backend;
 use crate::tensor::device::BackendTrainingCapabilities;
 use crate::tensor::offloading::{cpu_backend, cuda_backend, mlx_backend};
 use crate::tensor::tensor4d::{Tensor4D, TensorError};
@@ -11,6 +13,7 @@ pub enum TensorBackendKind {
     Cpu,
     Cuda,
     Mlx,
+    Distributed,
 }
 
 impl TensorBackendKind {
@@ -20,6 +23,7 @@ impl TensorBackendKind {
             Self::Cpu => "cpu",
             Self::Cuda => "cuda",
             Self::Mlx => "mlx",
+            Self::Distributed => "distributed",
         }
     }
 
@@ -28,6 +32,7 @@ impl TensorBackendKind {
             "cpu" => Some(Self::Cpu),
             "cuda" | "gpu" => Some(Self::Cuda),
             "mlx" => Some(Self::Mlx),
+            "distributed" | "p2p" | "swarm" => Some(Self::Distributed),
             "auto" | "default" | "" => None,
             _ => None,
         }
@@ -567,6 +572,8 @@ pub(crate) fn cpu_conv_block_backward_gradients(
 
 pub use cpu_backend::CpuTensorBackend;
 pub use cuda_backend::CudaTensorBackend;
+#[cfg(feature = "backend-distributed")]
+pub use distributed_backend::DistributedTensorBackend;
 pub use mlx_backend::{
     MlxBackpropPathSnapshot,
     MlxTensorBackend,
@@ -586,12 +593,27 @@ pub fn mlx_backend() -> MlxTensorBackend {
     mlx_backend::mlx_backend()
 }
 
+#[cfg(feature = "backend-distributed")]
+pub fn distributed_backend() -> DistributedTensorBackend {
+    distributed_backend::distributed_backend()
+}
+
 pub fn cuda_backend_available() -> bool {
     cuda_backend::cuda_backend_available()
 }
 
 pub fn mlx_backend_available() -> bool {
     mlx_backend::mlx_backend_available()
+}
+
+#[cfg(feature = "backend-distributed")]
+pub fn distributed_backend_available() -> bool {
+    distributed_backend::distributed_backend_available()
+}
+
+#[cfg(not(feature = "backend-distributed"))]
+pub fn distributed_backend_available() -> bool {
+    false
 }
 
 pub fn preferred_backend_kind() -> Option<TensorBackendKind> {
@@ -614,7 +636,7 @@ fn backend_for_kind(kind: TensorBackendKind) -> Option<BackendEndpoint> {
         }
 
         TensorBackendKind::Cuda => {
-            #[cfg(feature = "offloading-cuda")]
+            #[cfg(feature = "backend-cuda")]
             {
                 if cuda_backend_available() {
                     static CUDA: CudaTensorBackend = CudaTensorBackend;
@@ -628,13 +650,27 @@ fn backend_for_kind(kind: TensorBackendKind) -> Option<BackendEndpoint> {
         }
 
         TensorBackendKind::Mlx => {
-            #[cfg(feature = "offloading-mlx")]
+            #[cfg(feature = "backend-mlx")]
             {
                 if mlx_backend_available() {
                     static MLX: MlxTensorBackend = MlxTensorBackend;
                     return Some(BackendEndpoint {
                         kind: TensorBackendKind::Mlx,
                         backend: &MLX,
+                    });
+                }
+            }
+            None
+        }
+
+        TensorBackendKind::Distributed => {
+            #[cfg(feature = "backend-distributed")]
+            {
+                if distributed_backend_available() {
+                    static DISTRIBUTED: DistributedTensorBackend = DistributedTensorBackend;
+                    return Some(BackendEndpoint {
+                        kind: TensorBackendKind::Distributed,
+                        backend: &DISTRIBUTED,
                     });
                 }
             }
@@ -656,7 +692,7 @@ fn resolve_primary_backend() -> Option<BackendEndpoint> {
         return None;
     }
 
-    for candidate in [TensorBackendKind::Cuda, TensorBackendKind::Mlx] {
+    for candidate in [TensorBackendKind::Cuda, TensorBackendKind::Mlx, TensorBackendKind::Distributed] {
         if let Some(selection) = backend_for_kind(candidate) {
             return Some(selection);
         }
@@ -689,15 +725,16 @@ pub fn active_backend_label() -> &'static str {
         TensorBackendKind::Cpu => "cpu",
         TensorBackendKind::Cuda => "cuda",
         TensorBackendKind::Mlx => {
-            #[cfg(feature = "offloading-mlx")]
+            #[cfg(feature = "backend-mlx")]
             {
                 mlx_backend::mlx_backend_label()
             }
-            #[cfg(not(feature = "offloading-mlx"))]
+            #[cfg(not(feature = "backend-mlx"))]
             {
                 "mlx"
             }
         }
+        TensorBackendKind::Distributed => "distributed",
     }
 
 }
@@ -735,13 +772,21 @@ mod tests {
     fn active_backend_training_capabilities_match_backend_mode() {
         let caps = active_backend_training_capabilities();
 
-        #[cfg(all(not(feature = "offloading-cuda"), not(feature = "offloading-mlx")))]
+        #[cfg(all(
+            not(feature = "backend-cuda"),
+            not(feature = "backend-mlx"),
+            not(feature = "backend-distributed")
+        ))]
         {
             assert!(!caps.native_forward_execution);
             assert!(!caps.native_backward_execution);
         }
 
-        #[cfg(any(feature = "offloading-cuda", feature = "offloading-mlx"))]
+        #[cfg(any(
+            feature = "backend-cuda",
+            feature = "backend-mlx",
+            feature = "backend-distributed"
+        ))]
         {
             assert!(caps.native_forward_execution);
             assert!(caps.native_backward_execution);
@@ -828,7 +873,7 @@ mod tests {
         assert_eq!(gap_via_cuda_backend, gap_via_cpu);
 
         assert_eq!(backend.name(), "cuda");
-        assert_eq!(cuda_backend_available(), cfg!(feature = "offloading-cuda"));
+        assert_eq!(cuda_backend_available(), cfg!(feature = "backend-cuda"));
     }
 
     #[test]
@@ -841,10 +886,17 @@ mod tests {
         assert!(conv.is_ok());
 
         assert_eq!(backend.name(), "mlx");
-        assert_eq!(mlx_backend_available(), cfg!(feature = "offloading-mlx"));
+        assert_eq!(mlx_backend_available(), cfg!(feature = "backend-mlx"));
     }
 
-    #[cfg(feature = "offloading-mlx")]
+    #[test]
+    fn distributed_backend_kind_parses_aliases() {
+        assert_eq!(TensorBackendKind::parse("distributed"), Some(TensorBackendKind::Distributed));
+        assert_eq!(TensorBackendKind::parse("p2p"), Some(TensorBackendKind::Distributed));
+        assert_eq!(TensorBackendKind::parse("swarm"), Some(TensorBackendKind::Distributed));
+    }
+
+    #[cfg(feature = "backend-mlx")]
     #[test]
     fn mlx_conv_block_backward_matches_cpu_reference() {
         let backend = mlx_backend();
@@ -961,7 +1013,7 @@ mod tests {
         assert_close_tensor(mlx_input_grad, cpu_input_grad, 1e-4);
     }
 
-    #[cfg(feature = "offloading-mlx")]
+    #[cfg(feature = "backend-mlx")]
     #[test]
     fn mlx_batched_conv_block_backward_matches_cpu_reference() {
         let backend = mlx_backend();
@@ -1106,7 +1158,11 @@ mod tests {
         assert_close_tensor(mlx_input_grad, cpu_input_grad, 1e-4);
     }
 
-    #[cfg(all(not(feature = "offloading-cuda"), not(feature = "offloading-mlx")))]
+    #[cfg(all(
+        not(feature = "backend-cuda"),
+        not(feature = "backend-mlx"),
+        not(feature = "backend-distributed")
+    ))]
     #[test]
     fn active_backend_defaults_to_cpu_without_offloading_features() {
         assert_eq!(active_backend_name(), "cpu");

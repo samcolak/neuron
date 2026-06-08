@@ -6,20 +6,20 @@ use crate::tensor::backend::{
 use crate::tensor::device::BackendTrainingCapabilities;
 use crate::tensor::tensor4d::{Tensor4D, TensorError};
 
-#[cfg(feature = "offloading-cuda")]
+#[cfg(feature = "backend-cuda")]
 use cudarc::driver::{CudaDevice, CudaSlice, DeviceSlice, LaunchAsync, LaunchConfig};
-#[cfg(feature = "offloading-cuda")]
+#[cfg(feature = "backend-cuda")]
 use cudarc::nvrtc::compile_ptx;
-#[cfg(feature = "offloading-cuda")]
+#[cfg(feature = "backend-cuda")]
 use std::panic::{self, AssertUnwindSafe};
-#[cfg(feature = "offloading-cuda")]
+#[cfg(feature = "backend-cuda")]
 use std::time::Instant;
-#[cfg(feature = "offloading-cuda")]
+#[cfg(feature = "backend-cuda")]
 use std::collections::HashMap;
-#[cfg(feature = "offloading-cuda")]
+#[cfg(feature = "backend-cuda")]
 use std::sync::{Arc, Mutex, OnceLock};
 
-#[cfg(feature = "offloading-cuda")]
+#[cfg(feature = "backend-cuda")]
 fn cuda_allow_cpu_fallback() -> bool {
     crate::tensor::backend::cpu_fallback_enabled()
 }
@@ -152,7 +152,7 @@ fn cuda_conv_block_backward_gradients_fallback(
     pooled_grad: &Tensor4D,
     compute_input_grad: bool,
 ) -> Result<ConvBlockBackwardGradients, TensorError> {
-    #[cfg(feature = "offloading-cuda")]
+    #[cfg(feature = "backend-cuda")]
     {
         let native_result = if pooled_shape.0 > 1 {
             cuda_conv_block_backward_gradients_native_batched_by_sample(
@@ -196,7 +196,7 @@ fn cuda_conv_block_backward_gradients_fallback(
     )
 }
 
-#[cfg(feature = "offloading-cuda")]
+#[cfg(feature = "backend-cuda")]
 fn tensor4d_sample(input: &Tensor4D, sample_idx: usize) -> Result<Tensor4D, TensorError> {
     let (n, c, h, w) = input.shape();
     if sample_idx >= n {
@@ -219,7 +219,7 @@ fn tensor4d_sample(input: &Tensor4D, sample_idx: usize) -> Result<Tensor4D, Tens
     Tensor4D::from_vec(1, c, h, w, input.as_slice()[start..end].to_vec())
 }
 
-#[cfg(feature = "offloading-cuda")]
+#[cfg(feature = "backend-cuda")]
 #[allow(clippy::too_many_arguments)]
 fn cuda_conv_block_backward_gradients_native_batched_by_sample(
     kernels: &Tensor4D,
@@ -336,7 +336,7 @@ pub fn cuda_backend() -> CudaTensorBackend {
 }
 
 pub fn cuda_backend_available() -> bool {
-    cfg!(feature = "offloading-cuda")
+    cfg!(feature = "backend-cuda")
 }
 
 // Staged CUDA support:
@@ -349,7 +349,7 @@ fn cuda_conv2d_valid_fallback(
     stride_h: usize,
     stride_w: usize,
 ) -> Result<Tensor4D, TensorError> {
-    #[cfg(feature = "offloading-cuda")]
+    #[cfg(feature = "backend-cuda")]
     {
         if let Ok(result) = cuda_conv2d_valid_kernel(input, kernels, bias, stride_h, stride_w) {
             return Ok(result);
@@ -366,7 +366,7 @@ fn cuda_max_pool2d_fallback(
     stride_h: usize,
     stride_w: usize,
 ) -> Result<Tensor4D, TensorError> {
-    #[cfg(feature = "offloading-cuda")]
+    #[cfg(feature = "backend-cuda")]
     {
         if let Ok(result) = cuda_max_pool2d_kernel(input, window_h, window_w, stride_h, stride_w) {
             return Ok(result);
@@ -377,7 +377,7 @@ fn cuda_max_pool2d_fallback(
 }
 
 fn cuda_global_average_pool2d_fallback(input: &Tensor4D) -> Result<Tensor4D, TensorError> {
-    #[cfg(feature = "offloading-cuda")]
+    #[cfg(feature = "backend-cuda")]
     {
         if let Ok(result) = cuda_global_average_pool2d_kernel(input) {
             return Ok(result);
@@ -388,7 +388,7 @@ fn cuda_global_average_pool2d_fallback(input: &Tensor4D) -> Result<Tensor4D, Ten
 }
 
 fn cuda_relu_inplace_fallback(input: &mut Tensor4D) {
-    #[cfg(feature = "offloading-cuda")]
+    #[cfg(feature = "backend-cuda")]
     {
         if cuda_relu_inplace_kernel(input).is_ok() {
             return;
@@ -398,20 +398,20 @@ fn cuda_relu_inplace_fallback(input: &mut Tensor4D) {
     input.relu_inplace_cpu();
 }
 
-#[cfg(feature = "offloading-cuda")]
+#[cfg(feature = "backend-cuda")]
 struct CudaKernelContext {
     device: Arc<CudaDevice>,
     buffer_pool: Mutex<CudaDeviceBufferPool>,
 }
 
-#[cfg(feature = "offloading-cuda")]
+#[cfg(feature = "backend-cuda")]
 #[derive(Default)]
 struct CudaDeviceBufferPool {
     f32_buffers: HashMap<&'static str, CudaSlice<f32>>,
     u32_buffers: HashMap<&'static str, CudaSlice<u32>>,
 }
 
-#[cfg(feature = "offloading-cuda")]
+#[cfg(feature = "backend-cuda")]
 impl CudaDeviceBufferPool {
     fn take_f32(
         &mut self,
@@ -456,42 +456,42 @@ impl CudaDeviceBufferPool {
     }
 }
 
-#[cfg(feature = "offloading-cuda")]
+#[cfg(feature = "backend-cuda")]
 static CUDA_KERNEL_CONTEXT: OnceLock<Result<CudaKernelContext, String>> = OnceLock::new();
 
-#[cfg(feature = "offloading-cuda")]
+#[cfg(feature = "backend-cuda")]
 fn cuda_runtime_supported_on_platform() -> bool {
     cfg!(any(target_os = "linux", target_os = "windows"))
 }
 
-#[cfg(feature = "offloading-cuda")]
+#[cfg(feature = "backend-cuda")]
 const CUDA_KERNEL_MODULE: &str = "neuralnet_tensor_module";
 
-#[cfg(feature = "offloading-cuda")]
+#[cfg(feature = "backend-cuda")]
 const CUDA_RELU_KERNEL: &str = "relu_inplace_kernel";
 
-#[cfg(feature = "offloading-cuda")]
+#[cfg(feature = "backend-cuda")]
 const CUDA_CONV_VALID_KERNEL: &str = "conv2d_valid_nchw_kernel";
 
-#[cfg(feature = "offloading-cuda")]
+#[cfg(feature = "backend-cuda")]
 const CUDA_MAX_POOL2D_VALID_KERNEL: &str = "max_pool2d_valid_nchw_kernel";
 
-#[cfg(feature = "offloading-cuda")]
+#[cfg(feature = "backend-cuda")]
 const CUDA_GAP2D_KERNEL: &str = "global_average_pool2d_nchw_kernel";
 
-#[cfg(feature = "offloading-cuda")]
+#[cfg(feature = "backend-cuda")]
 const CUDA_UNPOOL_RELU_GRAD_KERNEL: &str = "unpool_relu_grad_nchw_kernel";
 
-#[cfg(feature = "offloading-cuda")]
+#[cfg(feature = "backend-cuda")]
 const CUDA_BIAS_GRAD_KERNEL: &str = "conv_bias_grad_nchw_kernel";
 
-#[cfg(feature = "offloading-cuda")]
+#[cfg(feature = "backend-cuda")]
 const CUDA_KERNEL_GRAD_KERNEL: &str = "conv_kernel_grad_nchw_kernel";
 
-#[cfg(feature = "offloading-cuda")]
+#[cfg(feature = "backend-cuda")]
 const CUDA_INPUT_GRAD_KERNEL: &str = "conv_input_grad_nchw_kernel";
 
-#[cfg(feature = "offloading-cuda")]
+#[cfg(feature = "backend-cuda")]
 const CUDA_RELU_SRC: &str = r#"
 extern "C" __global__
 void relu_inplace_kernel(float* input, unsigned int len) {
@@ -790,7 +790,7 @@ void conv_input_grad_nchw_kernel(
 }
 "#;
 
-#[cfg(feature = "offloading-cuda")]
+#[cfg(feature = "backend-cuda")]
 fn cuda_kernel_context() -> Result<&'static CudaKernelContext, TensorError> {
 
     let context_result = CUDA_KERNEL_CONTEXT.get_or_init(|| {
@@ -836,7 +836,7 @@ fn cuda_kernel_context() -> Result<&'static CudaKernelContext, TensorError> {
 
 }
 
-#[cfg(feature = "offloading-cuda")]
+#[cfg(feature = "backend-cuda")]
 fn cuda_relu_inplace_kernel(input: &mut Tensor4D) -> Result<(), TensorError> {
 
     if input.is_empty() {
@@ -873,7 +873,7 @@ fn cuda_relu_inplace_kernel(input: &mut Tensor4D) -> Result<(), TensorError> {
 
 }
 
-#[cfg(feature = "offloading-cuda")]
+#[cfg(feature = "backend-cuda")]
 fn cuda_conv2d_valid_kernel(
     input: &Tensor4D,
     kernels: &Tensor4D,
@@ -1007,7 +1007,7 @@ fn cuda_conv2d_valid_kernel(
     
 }
 
-#[cfg(feature = "offloading-cuda")]
+#[cfg(feature = "backend-cuda")]
 fn cuda_max_pool2d_kernel(
     input: &Tensor4D,
     window_h: usize,
@@ -1095,7 +1095,7 @@ fn cuda_max_pool2d_kernel(
 
 }
 
-#[cfg(feature = "offloading-cuda")]
+#[cfg(feature = "backend-cuda")]
 fn cuda_global_average_pool2d_kernel(input: &Tensor4D) -> Result<Tensor4D, TensorError> {
 
     let (batch, channels, h, w) = input.shape();
@@ -1216,7 +1216,7 @@ fn cuda_conv_blocks_to_feature_vec_fallback(
 
 }
 
-#[cfg(feature = "offloading-cuda")]
+#[cfg(feature = "backend-cuda")]
 #[allow(clippy::too_many_arguments)]
 fn cuda_conv_block_backward_gradients_kernel(
     kernels: &Tensor4D,

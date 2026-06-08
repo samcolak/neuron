@@ -6,16 +6,16 @@ use crate::tensor::backend::{
 use crate::tensor::device::BackendTrainingCapabilities;
 use crate::tensor::tensor4d::{Tensor4D, TensorError};
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 use apple_mlx::raw;
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 use std::sync::{Mutex, OnceLock};
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 use std::time::Instant;
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 fn mlx_allow_cpu_fallback() -> bool {
     crate::tensor::backend::cpu_fallback_enabled()
 }
@@ -23,13 +23,13 @@ fn mlx_allow_cpu_fallback() -> bool {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MlxTensorBackend;
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 #[derive(Debug)]
 pub struct MlxOwnedArray {
     array: raw::mlx_array,
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 impl Drop for MlxOwnedArray {
     fn drop(&mut self) {
         unsafe {
@@ -96,7 +96,7 @@ impl MlxBackpropPathSnapshot {
     }
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 #[derive(Default)]
 struct MlxBackpropPathCounters {
     total_calls: AtomicU64,
@@ -121,14 +121,14 @@ struct MlxBackpropPathCounters {
     native_dw_materialize_time_ns: AtomicU64,
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 fn mlx_backprop_path_counters() -> &'static MlxBackpropPathCounters {
     static COUNTERS: OnceLock<MlxBackpropPathCounters> = OnceLock::new();
     COUNTERS.get_or_init(MlxBackpropPathCounters::default)
 }
 
 pub fn mlx_backprop_path_snapshot() -> MlxBackpropPathSnapshot {
-    #[cfg(feature = "offloading-mlx")]
+    #[cfg(feature = "backend-mlx")]
     {
         let counters = mlx_backprop_path_counters();
         return MlxBackpropPathSnapshot {
@@ -161,14 +161,14 @@ pub fn mlx_backprop_path_snapshot() -> MlxBackpropPathSnapshot {
         };
     }
 
-    #[cfg(not(feature = "offloading-mlx"))]
+    #[cfg(not(feature = "backend-mlx"))]
     {
         MlxBackpropPathSnapshot::default()
     }
 }
 
 pub fn mlx_backprop_path_reset() {
-    #[cfg(feature = "offloading-mlx")]
+    #[cfg(feature = "backend-mlx")]
     {
         let counters = mlx_backprop_path_counters();
         counters.total_calls.store(0, Ordering::Relaxed);
@@ -325,7 +325,7 @@ fn mlx_conv_block_backward_gradients_fallback(
     compute_input_grad: bool,
 ) -> Result<ConvBlockBackwardGradients, TensorError> {
     
-    #[cfg(feature = "offloading-mlx")]
+    #[cfg(feature = "backend-mlx")]
     {
         let counters = mlx_backprop_path_counters();
         counters.total_calls.fetch_add(1, Ordering::Relaxed);
@@ -399,7 +399,7 @@ fn mlx_conv_block_backward_gradients_fallback(
 
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 fn tensor4d_sample(input: &Tensor4D, sample_idx: usize) -> Result<Tensor4D, TensorError> {
     let (n, c, h, w) = input.shape();
     if sample_idx >= n {
@@ -422,7 +422,7 @@ fn tensor4d_sample(input: &Tensor4D, sample_idx: usize) -> Result<Tensor4D, Tens
     Tensor4D::from_vec(1, c, h, w, input.as_slice()[start..end].to_vec())
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 #[allow(clippy::too_many_arguments)]
 fn mlx_conv_block_backward_gradients_native_batched_by_sample(
     kernels: &Tensor4D,
@@ -532,7 +532,7 @@ fn mlx_conv_block_backward_gradients_native_batched_by_sample(
     })
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 #[allow(clippy::too_many_arguments)]
 fn mlx_conv_block_backward_gradients_native(
     kernels: &Tensor4D,
@@ -833,17 +833,17 @@ fn mlx_conv_block_backward_gradients_native(
     })
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 fn mlx_enable_experimental_native_dw() -> bool {
     crate::tensor::backend::native_dw_enabled()
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 fn mlx_enable_experimental_native_dinput() -> bool {
     crate::tensor::backend::native_dinput_enabled()
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 fn mlx_kernel_grad_native_from_conv_grad_array(
     conv_grad_nchw: raw::mlx_array,
     input: &Tensor4D,
@@ -939,7 +939,7 @@ fn mlx_kernel_grad_native_from_conv_grad_array(
     Ok(kernel_grad)
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 fn mlx_input_grad_native_from_conv_grad_array(
     conv_grad_nchw: raw::mlx_array,
     kernels: &Tensor4D,
@@ -986,7 +986,7 @@ fn mlx_input_grad_native_from_conv_grad_array(
     Ok(input_grad)
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 fn cpu_kernel_grad_from_conv_grad(
     kernels: &Tensor4D,
     input: &Tensor4D,
@@ -1028,7 +1028,7 @@ fn cpu_kernel_grad_from_conv_grad(
     Ok(kernel_grad)
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 fn cpu_input_grad_from_conv_grad(
     kernels: &Tensor4D,
     conv_grad: &Tensor4D,
@@ -1087,18 +1087,18 @@ pub fn mlx_backend() -> MlxTensorBackend {
 }
 
 pub fn mlx_backend_available() -> bool {
-    #[cfg(feature = "offloading-mlx")]
+    #[cfg(feature = "backend-mlx")]
     {
         true
     }
 
-    #[cfg(not(feature = "offloading-mlx"))]
+    #[cfg(not(feature = "backend-mlx"))]
     {
         false
     }
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 pub fn mlx_owned_array_from_tensor(tensor: &Tensor4D) -> Result<MlxOwnedArray, TensorError> {
     let _guard = mlx_runtime_lock()
         .lock()
@@ -1115,7 +1115,7 @@ pub fn mlx_owned_array_from_tensor(tensor: &Tensor4D) -> Result<MlxOwnedArray, T
     Ok(MlxOwnedArray { array })
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 pub fn mlx_owned_array_to_tensor(array: &MlxOwnedArray) -> Result<Tensor4D, TensorError> {
     let _guard = mlx_runtime_lock()
         .lock()
@@ -1128,7 +1128,7 @@ pub fn mlx_owned_array_to_tensor(array: &MlxOwnedArray) -> Result<Tensor4D, Tens
     result
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 pub fn mlx_apply_sgd_update_in_place(
     target: &mut MlxOwnedArray,
     gradient: &Tensor4D,
@@ -1165,7 +1165,7 @@ pub fn mlx_apply_sgd_update_in_place(
     Ok(())
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 pub fn mlx_add_tensor_in_place(
     target: &mut MlxOwnedArray,
     value: &Tensor4D,
@@ -1191,7 +1191,7 @@ pub fn mlx_add_tensor_in_place(
     Ok(())
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 pub fn mlx_zero_in_place(target: &mut MlxOwnedArray) -> Result<(), TensorError> {
     let _guard = mlx_runtime_lock()
         .lock()
@@ -1212,7 +1212,7 @@ pub fn mlx_zero_in_place(target: &mut MlxOwnedArray) -> Result<(), TensorError> 
     Ok(())
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 pub fn mlx_apply_sgd_update_from_array_in_place(
     target: &mut MlxOwnedArray,
     gradient: &MlxOwnedArray,
@@ -1252,7 +1252,7 @@ pub fn mlx_apply_sgd_update_from_array_in_place(
     Ok(())
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 pub fn mlx_conv_blocks_to_feature_vec_with_mirrored_params(
     input: &Tensor4D,
     block1: (&MlxOwnedArray, (usize, usize, usize, usize), &MlxOwnedArray),
@@ -1396,7 +1396,7 @@ pub fn mlx_conv_blocks_to_feature_vec_with_mirrored_params(
     Ok(gap_tensor?.first_sample_features())
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 pub fn mlx_conv2d_valid_with_mirrored_params(
     input: &Tensor4D,
     kernels: &MlxOwnedArray,
@@ -1478,13 +1478,13 @@ pub fn mlx_conv2d_valid_with_mirrored_params(
 }
 
 pub fn mlx_backend_uses_gpu() -> bool {
-    #[cfg(feature = "offloading-mlx")]
+    #[cfg(feature = "backend-mlx")]
     unsafe {
         let mut count = 0;
         raw::mlx_device_count(&mut count, raw::mlx_device_type__MLX_GPU) == 0 && count > 0
     }
 
-    #[cfg(not(feature = "offloading-mlx"))]
+    #[cfg(not(feature = "backend-mlx"))]
     {
         false
     }
@@ -1505,12 +1505,12 @@ fn mlx_conv2d_valid(
     stride_h: usize,
     stride_w: usize,
 ) -> Result<Tensor4D, TensorError> {
-    #[cfg(feature = "offloading-mlx")]
+    #[cfg(feature = "backend-mlx")]
     {
         mlx_conv2d_valid_native(input, kernels, bias, stride_h, stride_w)
     }
 
-    #[cfg(not(feature = "offloading-mlx"))]
+    #[cfg(not(feature = "backend-mlx"))]
     {
         input.conv2d_valid_cpu(kernels, bias, stride_h, stride_w)
     }
@@ -1528,7 +1528,7 @@ fn mlx_conv_relu_max_pool2d_valid(
     pool_stride_h: usize,
     pool_stride_w: usize,
 ) -> Result<Tensor4D, TensorError> {
-    #[cfg(feature = "offloading-mlx")]
+    #[cfg(feature = "backend-mlx")]
     {
         mlx_conv_relu_max_pool2d_valid_native(
             input,
@@ -1543,7 +1543,7 @@ fn mlx_conv_relu_max_pool2d_valid(
         )
     }
 
-    #[cfg(not(feature = "offloading-mlx"))]
+    #[cfg(not(feature = "backend-mlx"))]
     {
         let mut conv = input.conv2d_valid_cpu(kernels, bias, conv_stride_h, conv_stride_w)?;
         conv.relu_inplace_cpu();
@@ -1565,7 +1565,7 @@ fn mlx_conv_blocks_to_feature_vec(
     pool_stride_w: usize,
 ) -> Result<Vec<f32>, TensorError> {
 
-    #[cfg(feature = "offloading-mlx")]
+    #[cfg(feature = "backend-mlx")]
     {
         mlx_conv_blocks_to_feature_vec_native(
             input,
@@ -1581,7 +1581,7 @@ fn mlx_conv_blocks_to_feature_vec(
         )
     }
 
-    #[cfg(not(feature = "offloading-mlx"))]
+    #[cfg(not(feature = "backend-mlx"))]
     {
         let b1_out = {
             let mut conv = input.conv2d_valid_cpu(block1_kernels, Some(block1_bias), conv_stride_h, conv_stride_w)?;
@@ -1609,12 +1609,12 @@ fn mlx_max_pool2d(
     stride_w: usize,
 ) -> Result<Tensor4D, TensorError> {
 
-    #[cfg(feature = "offloading-mlx")]
+    #[cfg(feature = "backend-mlx")]
     {
         mlx_max_pool2d_native(input, window_h, window_w, stride_h, stride_w)
     }
 
-    #[cfg(not(feature = "offloading-mlx"))]
+    #[cfg(not(feature = "backend-mlx"))]
     {
         input.max_pool2d_cpu(window_h, window_w, stride_h, stride_w)
     }
@@ -1623,12 +1623,12 @@ fn mlx_max_pool2d(
 
 fn mlx_global_average_pool2d(input: &Tensor4D) -> Result<Tensor4D, TensorError> {
 
-    #[cfg(feature = "offloading-mlx")]
+    #[cfg(feature = "backend-mlx")]
     {
         mlx_global_average_pool2d_native(input)
     }
 
-    #[cfg(not(feature = "offloading-mlx"))]
+    #[cfg(not(feature = "backend-mlx"))]
     {
         input.global_average_pool2d_cpu()
     }
@@ -1637,7 +1637,7 @@ fn mlx_global_average_pool2d(input: &Tensor4D) -> Result<Tensor4D, TensorError> 
 
 fn mlx_relu_inplace(input: &mut Tensor4D) {
 
-    #[cfg(feature = "offloading-mlx")]
+    #[cfg(feature = "backend-mlx")]
     {
         if let Ok(result) = mlx_relu_native(input) {
             *input = result;
@@ -1649,7 +1649,7 @@ fn mlx_relu_inplace(input: &mut Tensor4D) {
 
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 fn mlx_check(code: i32, context: &'static str) -> Result<(), TensorError> {
     if code == 0 {
         Ok(())
@@ -1658,7 +1658,7 @@ fn mlx_check(code: i32, context: &'static str) -> Result<(), TensorError> {
     }
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 fn mlx_stream_new() -> raw::mlx_stream {
     unsafe {
         if mlx_backend_uses_gpu() {
@@ -1668,18 +1668,18 @@ fn mlx_stream_new() -> raw::mlx_stream {
     }
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 fn mlx_array_new() -> raw::mlx_array {
     unsafe { raw::mlx_array_new() }
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 fn mlx_runtime_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 fn mlx_array_from_tensor(tensor: &Tensor4D) -> raw::mlx_array {
     let (n, c, h, w) = tensor.shape();
     let shape = [n as i32, c as i32, h as i32, w as i32];
@@ -1693,7 +1693,7 @@ fn mlx_array_from_tensor(tensor: &Tensor4D) -> raw::mlx_array {
     }
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 fn mlx_array_to_tensor(array: raw::mlx_array, stream: raw::mlx_stream) -> Result<Tensor4D, TensorError> {
 
     unsafe {
@@ -1732,7 +1732,7 @@ fn mlx_array_to_tensor(array: raw::mlx_array, stream: raw::mlx_stream) -> Result
 
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 fn mlx_transpose_axes(
     input: raw::mlx_array,
     axes: &[i32],
@@ -1748,7 +1748,7 @@ fn mlx_transpose_axes(
     Ok(out)
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 fn mlx_reshape(
     input: raw::mlx_array,
     shape: &[i32],
@@ -1764,7 +1764,7 @@ fn mlx_reshape(
     Ok(out)
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 fn mlx_max_pool2d_array_nchw(
     input: raw::mlx_array,
     input_shape: (usize, usize, usize, usize),
@@ -1839,7 +1839,7 @@ fn mlx_max_pool2d_array_nchw(
     Ok(reduced_hw)
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 fn mlx_conv2d_valid_native(
     input: &Tensor4D,
     kernels: &Tensor4D,
@@ -1948,7 +1948,7 @@ fn mlx_conv2d_valid_native(
     result
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 fn mlx_conv_relu_max_pool2d_valid_native(
     input: &Tensor4D,
     kernels: &Tensor4D,
@@ -2095,7 +2095,7 @@ fn mlx_conv_relu_max_pool2d_valid_native(
 /// Fused conv→relu→pool (up to 2 blocks) → GAP for inference.
 /// All intermediate arrays stay on-device; only the tiny feature vec is
 /// copied back to the host, eliminating 2-4 intermediate synchronisations.
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 fn mlx_conv_blocks_to_feature_vec_native(
     input: &Tensor4D,
     block1_kernels: &Tensor4D,
@@ -2267,7 +2267,7 @@ fn mlx_conv_blocks_to_feature_vec_native(
     Ok(features)
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 fn mlx_max_pool2d_native(
     input: &Tensor4D,
     window_h: usize,
@@ -2316,7 +2316,7 @@ fn mlx_max_pool2d_native(
     result
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 fn mlx_global_average_pool2d_native(input: &Tensor4D) -> Result<Tensor4D, TensorError> {
     let _guard = mlx_runtime_lock()
         .lock()
@@ -2342,7 +2342,7 @@ fn mlx_global_average_pool2d_native(input: &Tensor4D) -> Result<Tensor4D, Tensor
     result
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 fn mlx_relu_native(input: &Tensor4D) -> Result<Tensor4D, TensorError> {
     let _guard = mlx_runtime_lock()
         .lock()
@@ -2447,7 +2447,7 @@ mod tests {
 
     #[test]
     fn mlx_backend_feature_flag_reflects_build_configuration() {
-        assert_eq!(mlx_backend_available(), cfg!(feature = "offloading-mlx"));
+        assert_eq!(mlx_backend_available(), cfg!(feature = "backend-mlx"));
     }
 
     #[test]

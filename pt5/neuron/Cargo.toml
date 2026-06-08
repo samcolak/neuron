@@ -9,12 +9,20 @@ description = "Runnable companion app and walkthrough harness for the neuralnet 
 [features]
 default = []
 # uncomment this below for mlx (if you have an Mx Apple Device running Tahoe 25.xx+)
-# default = ["offloading-mlx"]
+# default = ["backend-mlx"]
 # uncomment this below for cuda (if you have an NVidia card attached)
-# default = ["offloading-cuda"]
+# default = ["backend-cuda"]
 
-offloading-mlx = ["neuralnet/offloading-mlx"]
-offloading-cuda = ["neuralnet/offloading-cuda"]
+backend-mlx = ["neuralnet/backend-mlx"]
+backend-cuda = ["neuralnet/backend-cuda"]
+backend-distributed = ["neuralnet/backend-distributed"]
+backend-distributed-libp2p = ["neuralnet/backend-distributed-libp2p"]
+
+# Backward-compatible aliases (to be removed in a future major release)
+offloading-mlx = ["backend-mlx"]
+offloading-cuda = ["backend-cuda"]
+offloading-distributed = ["backend-distributed"]
+distributed-libp2p = ["backend-distributed-libp2p"]
 
 [dependencies]
 neuralnet = { path = "../../library/neuralnet" }

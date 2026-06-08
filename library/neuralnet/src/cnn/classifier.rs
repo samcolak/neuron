@@ -21,7 +21,7 @@ use crate::tensor::adapters::{
     TensorAdapterError,
 };
 use crate::cnn::data_pipeline::ImageTensorShape;
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 use crate::tensor::offloading::mlx_backend::{
     mlx_conv2d_valid_with_mirrored_params,
 };
@@ -2204,7 +2204,7 @@ fn forward_feature_block_with_cache(
     block: &ConvParameterState,
 ) -> Result<(Tensor4D, ConvBlockCache), CnnImageClassifierError> {
 
-    #[cfg(feature = "offloading-mlx")]
+    #[cfg(feature = "backend-mlx")]
     if active_backend().name() == "mlx"
         && let Some((kernels, kernels_shape, bias)) = block.mlx_mirror_views()
     {
@@ -2219,7 +2219,7 @@ fn forward_feature_block_with_cache_timed(
     block: &ConvParameterState,
 ) -> Result<(Tensor4D, ConvBlockCache, CnnForwardStageMetrics), CnnImageClassifierError> {
 
-    #[cfg(feature = "offloading-mlx")]
+    #[cfg(feature = "backend-mlx")]
     if active_backend().name() == "mlx"
         && let Some((kernels, kernels_shape, bias)) = block.mlx_mirror_views()
     {
@@ -2234,7 +2234,7 @@ fn forward_feature_block_no_cache(
     block: &ConvParameterState,
 ) -> Result<Tensor4D, CnnImageClassifierError> {
 
-    #[cfg(feature = "offloading-mlx")]
+    #[cfg(feature = "backend-mlx")]
     if active_backend().name() == "mlx"
         && let Some((kernels, kernels_shape, bias)) = block.mlx_mirror_views()
     {
@@ -2315,7 +2315,7 @@ fn forward_conv_block_no_cache(
     Ok(pooled)
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 fn forward_conv_block_with_mlx_mirror(
     input: &Tensor4D,
     kernels: &crate::tensor::offloading::mlx_backend::MlxOwnedArray,
@@ -2341,7 +2341,7 @@ fn forward_conv_block_with_mlx_mirror(
     ))
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 fn forward_conv_block_with_mlx_mirror_timed(
     input: &Tensor4D,
     kernels: &crate::tensor::offloading::mlx_backend::MlxOwnedArray,
@@ -2377,7 +2377,7 @@ fn forward_conv_block_with_mlx_mirror_timed(
     ))
 }
 
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 fn forward_conv_block_with_mlx_mirror_no_cache(
     input: &Tensor4D,
     kernels: &crate::tensor::offloading::mlx_backend::MlxOwnedArray,
@@ -2390,7 +2390,7 @@ fn forward_conv_block_with_mlx_mirror_no_cache(
     Ok(pooled)
 }
 
-#[cfg(not(feature = "offloading-mlx"))]
+#[cfg(not(feature = "backend-mlx"))]
 fn forward_conv_block_with_mlx_mirror_no_cache(
     _input: &Tensor4D,
     _kernels: &(),
@@ -2398,11 +2398,11 @@ fn forward_conv_block_with_mlx_mirror_no_cache(
     _bias: &(),
 ) -> Result<Tensor4D, CnnImageClassifierError> {
     Err(CnnImageClassifierError::InvalidConfiguration(
-        "mlx mirror path requires offloading-mlx feature",
+        "mlx mirror path requires backend-mlx feature",
     ))
 }
 
-#[cfg(not(feature = "offloading-mlx"))]
+#[cfg(not(feature = "backend-mlx"))]
 fn forward_conv_block_with_mlx_mirror(
     _input: &Tensor4D,
     _kernels: &(),
@@ -2410,7 +2410,7 @@ fn forward_conv_block_with_mlx_mirror(
     _bias: &(),
 ) -> Result<(Tensor4D, ConvBlockCache), CnnImageClassifierError> {
     Err(CnnImageClassifierError::InvalidConfiguration(
-        "mlx mirror path requires offloading-mlx feature",
+        "mlx mirror path requires backend-mlx feature",
     ))
 }
 

@@ -1,5 +1,5 @@
 use crate::tensor::backend::{active_backend_name, active_backend_training_capabilities};
-#[cfg(feature = "offloading-mlx")]
+#[cfg(feature = "backend-mlx")]
 use crate::tensor::offloading::mlx_backend::{
     mlx_add_tensor_in_place,
     mlx_apply_sgd_update_from_array_in_place,
@@ -47,13 +47,13 @@ impl HostConvParameterState {
 #[derive(Debug)]
 struct MlxMirroredConvParameterState {
     host: HostConvParameterState,
-    #[cfg(feature = "offloading-mlx")]
+    #[cfg(feature = "backend-mlx")]
     device_kernels: Option<MlxOwnedArray>,
-    #[cfg(feature = "offloading-mlx")]
+    #[cfg(feature = "backend-mlx")]
     device_bias: Option<MlxOwnedArray>,
-    #[cfg(feature = "offloading-mlx")]
+    #[cfg(feature = "backend-mlx")]
     device_grad_kernels: Option<MlxOwnedArray>,
-    #[cfg(feature = "offloading-mlx")]
+    #[cfg(feature = "backend-mlx")]
     device_grad_bias: Option<MlxOwnedArray>,
     host_dirty: bool,
     device_dirty: bool,
@@ -62,7 +62,7 @@ struct MlxMirroredConvParameterState {
 impl MlxMirroredConvParameterState {
     fn new(kernels: Tensor4D, bias: Vec<f32>) -> Self {
         let host = HostConvParameterState::new(kernels, bias);
-        #[cfg(feature = "offloading-mlx")]
+        #[cfg(feature = "backend-mlx")]
         let (device_kernels, device_bias, device_grad_kernels, device_grad_bias) = (
             mlx_owned_array_from_tensor(&host.kernels).ok(),
             Tensor4D::from_vec(1, host.bias.len(), 1, 1, host.bias.clone())
@@ -76,13 +76,13 @@ impl MlxMirroredConvParameterState {
 
         Self {
             host,
-            #[cfg(feature = "offloading-mlx")]
+            #[cfg(feature = "backend-mlx")]
             device_kernels,
-            #[cfg(feature = "offloading-mlx")]
+            #[cfg(feature = "backend-mlx")]
             device_bias,
-            #[cfg(feature = "offloading-mlx")]
+            #[cfg(feature = "backend-mlx")]
             device_grad_kernels,
-            #[cfg(feature = "offloading-mlx")]
+            #[cfg(feature = "backend-mlx")]
             device_grad_bias,
             host_dirty: false,
             device_dirty: false,
@@ -90,7 +90,7 @@ impl MlxMirroredConvParameterState {
     }
 
     fn sync_device_from_host(&mut self) {
-        #[cfg(feature = "offloading-mlx")]
+        #[cfg(feature = "backend-mlx")]
         {
             self.device_kernels = mlx_owned_array_from_tensor(&self.host.kernels).ok();
             self.device_bias = Tensor4D::from_vec(1, self.host.bias.len(), 1, 1, self.host.bias.clone())
@@ -101,7 +101,7 @@ impl MlxMirroredConvParameterState {
     }
 
     fn sync_host_from_device(&mut self) {
-        #[cfg(feature = "offloading-mlx")]
+        #[cfg(feature = "backend-mlx")]
         {
             if let Some(device_kernels) = self.device_kernels.as_ref()
                 && let Ok(kernels) = mlx_owned_array_to_tensor(device_kernels)
@@ -128,7 +128,7 @@ impl MlxMirroredConvParameterState {
             batch_size,
         )?;
 
-        #[cfg(feature = "offloading-mlx")]
+        #[cfg(feature = "backend-mlx")]
         {
             if let (Some(device_kernels), Some(device_grad_kernels)) =
                 (self.device_kernels.as_mut(), self.device_grad_kernels.as_ref())
@@ -255,7 +255,7 @@ impl ConvParameterState {
         self.backend_kind
     }
 
-    #[cfg(feature = "offloading-mlx")]
+    #[cfg(feature = "backend-mlx")]
     pub fn mlx_mirror_views(
         &self,
     ) -> Option<(
@@ -331,7 +331,7 @@ impl ConvParameterState {
             ConvParameterStorage::Mlx(state) => {
                 state.host.grad_accum_kernel.fill(0.0);
                 state.host.grad_accum_bias.fill(0.0);
-                #[cfg(feature = "offloading-mlx")]
+                #[cfg(feature = "backend-mlx")]
                 {
                     if let Some(device_grad_kernels) = state.device_grad_kernels.as_mut() {
                         let _ = mlx_zero_in_place(device_grad_kernels);
@@ -382,7 +382,7 @@ impl ConvParameterState {
                     *accum += *grad;
                 }
 
-                #[cfg(feature = "offloading-mlx")]
+                #[cfg(feature = "backend-mlx")]
                 {
                     if let Some(device_grad_kernels) = state.device_grad_kernels.as_mut() {
                         mlx_add_tensor_in_place(device_grad_kernels, kernel_grad)?;
