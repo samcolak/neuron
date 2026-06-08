@@ -12,6 +12,21 @@ if ! command -v cargo-llvm-cov >/dev/null 2>&1; then
   exit 1
 fi
 
+if [[ -z "${LLVM_COV:-}" ]] && command -v xcrun >/dev/null 2>&1; then
+  LLVM_COV="$(xcrun -f llvm-cov 2>/dev/null || true)"
+fi
+
+if [[ -z "${LLVM_PROFDATA:-}" ]] && command -v xcrun >/dev/null 2>&1; then
+  LLVM_PROFDATA="$(xcrun -f llvm-profdata 2>/dev/null || true)"
+fi
+
+if [[ -n "${LLVM_COV:-}" && -n "${LLVM_PROFDATA:-}" ]]; then
+  export LLVM_COV LLVM_PROFDATA
+  echo "Using LLVM tools:"
+  echo "  LLVM_COV=$LLVM_COV"
+  echo "  LLVM_PROFDATA=$LLVM_PROFDATA"
+fi
+
 MIN_LINES="${COVERAGE_MIN_LINES:-0}"
 echo "Using coverage line threshold: ${MIN_LINES}%"
 
