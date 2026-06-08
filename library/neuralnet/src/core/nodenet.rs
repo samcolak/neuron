@@ -8,9 +8,38 @@ use std::fmt::{Display, Formatter};
 use uuid::Uuid;
 
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContentProvenance {
+    pub source_id: Option<String>,
+    pub source_uri: Option<String>,
+    pub owner_controller: Option<String>,
+    pub license: Option<String>,
+    pub usage_rights: Option<String>,
+    pub lawful_basis: Option<String>,
+    pub purpose: Option<String>,
+    pub retention_policy: Option<String>,
+    pub collected_at_utc: Option<String>,
+    pub collector: Option<String>,
+    pub jurisdiction: Option<String>,
+    pub content_hash: Option<String>,
+    pub transformation_lineage: Vec<String>,
+}
+
+impl ContentProvenance {
+    pub fn has_minimum_attribution(&self) -> bool {
+        (self.source_id.is_some() || self.source_uri.is_some())
+            && self.owner_controller.is_some()
+            && (self.license.is_some() || self.usage_rights.is_some())
+    }
+}
+
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NodeMetadata {
+    #[serde(default)]
     pub attributes: HashMap<String, String>,
+    #[serde(default)]
+    pub provenance: Option<ContentProvenance>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -69,6 +98,7 @@ impl NodeMetadata {
     pub fn new() -> Self {
         Self {
             attributes: HashMap::new(),
+            provenance: None,
         }
     }
 
@@ -89,6 +119,91 @@ impl NodeMetadata {
             .map(String::as_str)
     }
 
+    pub fn set_provenance(&mut self, provenance: ContentProvenance) {
+        self.provenance = Some(provenance);
+    }
+
+    pub fn provenance(&self) -> Option<&ContentProvenance> {
+        self.provenance.as_ref()
+    }
+
+    pub fn has_minimum_provenance_for_review(&self) -> bool {
+        self.provenance
+            .as_ref()
+            .map(ContentProvenance::has_minimum_attribution)
+            .unwrap_or(false)
+    }
+
+    pub fn with_source_owner(
+        mut self,
+        source_id: Option<&str>,
+        source_uri: Option<&str>,
+        owner_controller: &str,
+    ) -> Self {
+        let mut provenance = self.provenance.take().unwrap_or_default();
+        provenance.source_id = source_id.map(ToString::to_string);
+        provenance.source_uri = source_uri.map(ToString::to_string);
+        provenance.owner_controller = Some(owner_controller.to_string());
+        self.provenance = Some(provenance);
+        self
+    }
+
+    pub fn with_usage_terms(
+        mut self,
+        license: Option<&str>,
+        usage_rights: Option<&str>,
+        lawful_basis: Option<&str>,
+    ) -> Self {
+        let mut provenance = self.provenance.take().unwrap_or_default();
+        provenance.license = license.map(ToString::to_string);
+        provenance.usage_rights = usage_rights.map(ToString::to_string);
+        provenance.lawful_basis = lawful_basis.map(ToString::to_string);
+        self.provenance = Some(provenance);
+        self
+    }
+
+    pub fn push_transformation_step(&mut self, step: &str) {
+        let mut provenance = self.provenance.take().unwrap_or_default();
+        provenance.transformation_lineage.push(step.to_string());
+        self.provenance = Some(provenance);
+    }
+
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metadata_review_check_requires_source_owner_and_usage_terms() {
+        let metadata = NodeMetadata::with_lang("en")
+            .with_source_owner(Some("doc-123"), Some("https://example.test/doc"), "example-owner")
+            .with_usage_terms(Some("CC-BY-4.0"), None, None);
+
+        assert!(metadata.has_minimum_provenance_for_review());
+    }
+
+    #[test]
+    fn metadata_review_check_fails_without_owner() {
+        let mut metadata = NodeMetadata::with_lang("en");
+        metadata.set_provenance(ContentProvenance {
+            source_id: Some("doc-123".to_string()),
+            source_uri: None,
+            owner_controller: None,
+            license: Some("CC-BY-4.0".to_string()),
+            usage_rights: None,
+            lawful_basis: None,
+            purpose: None,
+            retention_policy: None,
+            collected_at_utc: None,
+            collector: None,
+            jurisdiction: None,
+            content_hash: None,
+            transformation_lineage: Vec::new(),
+        });
+
+        assert!(!metadata.has_minimum_provenance_for_review());
+    }
 }
 
 pub trait NetworkNode {

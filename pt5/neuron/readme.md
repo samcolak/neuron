@@ -13,7 +13,7 @@ Again this is NOT feature complete - I welcome any additional help if someone wi
 
 ## Using CUDA (For NVidia GPUS)
 
-Sorry at the moment this is not implemented (yet) - Ill sort this out shortly tho !
+Sorry at the moment this is not fully implemented (yet) - The code is there but not battle-tested
 
 ## Using MLX (For Apple Mx Device)
 
