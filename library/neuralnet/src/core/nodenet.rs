@@ -59,6 +59,7 @@ impl Default for NodePayload {
 }
 
 impl NodePayload {
+
     pub fn text(value: &str) -> Self {
         Self::Text(value.to_string())
     }
@@ -73,6 +74,7 @@ impl NodePayload {
     pub fn as_str(&self) -> &str {
         self.as_text().unwrap_or("")
     }
+    
 }
 
 impl Display for NodePayload {
@@ -170,41 +172,6 @@ impl NodeMetadata {
 
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn metadata_review_check_requires_source_owner_and_usage_terms() {
-        let metadata = NodeMetadata::with_lang("en")
-            .with_source_owner(Some("doc-123"), Some("https://example.test/doc"), "example-owner")
-            .with_usage_terms(Some("CC-BY-4.0"), None, None);
-
-        assert!(metadata.has_minimum_provenance_for_review());
-    }
-
-    #[test]
-    fn metadata_review_check_fails_without_owner() {
-        let mut metadata = NodeMetadata::with_lang("en");
-        metadata.set_provenance(ContentProvenance {
-            source_id: Some("doc-123".to_string()),
-            source_uri: None,
-            owner_controller: None,
-            license: Some("CC-BY-4.0".to_string()),
-            usage_rights: None,
-            lawful_basis: None,
-            purpose: None,
-            retention_policy: None,
-            collected_at_utc: None,
-            collector: None,
-            jurisdiction: None,
-            content_hash: None,
-            transformation_lineage: Vec::new(),
-        });
-
-        assert!(!metadata.has_minimum_provenance_for_review());
-    }
-}
 
 pub trait NetworkNode {
 
@@ -251,4 +218,44 @@ pub trait NodeNetwork<C: NodeNetworkController> {
     );
     fn enumerate_path_content(&self, content: &C::Content)
     -> (Option<Self::Node>, Vec<Self::Node>);
+}
+
+
+
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+
+    #[test]
+    fn metadata_review_check_requires_source_owner_and_usage_terms() {
+        let metadata = NodeMetadata::with_lang("en")
+            .with_source_owner(Some("doc-123"), Some("https://example.test/doc"), "example-owner")
+            .with_usage_terms(Some("CC-BY-4.0"), None, None);
+
+        assert!(metadata.has_minimum_provenance_for_review());
+    }
+
+    #[test]
+    fn metadata_review_check_fails_without_owner() {
+        let mut metadata = NodeMetadata::with_lang("en");
+        metadata.set_provenance(ContentProvenance {
+            source_id: Some("doc-123".to_string()),
+            source_uri: None,
+            owner_controller: None,
+            license: Some("CC-BY-4.0".to_string()),
+            usage_rights: None,
+            lawful_basis: None,
+            purpose: None,
+            retention_policy: None,
+            collected_at_utc: None,
+            collector: None,
+            jurisdiction: None,
+            content_hash: None,
+            transformation_lineage: Vec::new(),
+        });
+
+        assert!(!metadata.has_minimum_provenance_for_review());
+    }
+
 }
