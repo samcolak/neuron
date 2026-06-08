@@ -1,4 +1,5 @@
 use neuralnet::core::brain::MultiModalNeuralNetwork;
+use neuralnet::helpers::image_io::load_png_or_jpeg_from_path;
 use crate::trainer_presentation::{
     format_prediction,
     print_confusion_matrix,
@@ -25,6 +26,18 @@ use neuralnet::training::trainer::{
 use neuralnet::training::training_loop::TrainingLoopConfig;
 use neuralnet::dendrites::text_dendrite::DendriteType;
 use neuralnet::helpers::multimodal_controller::MultiModalInput;
+use std::path::PathBuf;
+
+fn cnn_image_demo_path() -> PathBuf {
+    std::env::var("NEURON_CNN_IMAGE_PATH")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../library/neuralnet/src/cnn/architecture.png")
+        })
+}
 
 pub fn run_trainer_walkthrough() {
     
@@ -179,9 +192,49 @@ pub fn run_trainer_walkthrough() {
     let image_validation = cnn_image_validation_samples();
     let image_probes = cnn_image_probe_inputs();
 
+    let demo_image_path = cnn_image_demo_path();
+    let demo_image = load_png_or_jpeg_from_path(demo_image_path.as_path())
+        .unwrap_or_else(|error| panic!("cnn demo image should load from '{}': {}", demo_image_path.display(), error));
+
+    println!(
+        "    demo image source: {} ({}x{} channels={})",
+        demo_image_path.display(),
+        demo_image.width,
+        demo_image.height,
+        demo_image.channels
+    );
+
+    let demo_pre_path = image_network.enumerate_image_bytes_path(demo_image.as_slice()).0;
+    println!(
+        "    pre-insert image path lookup -> {}",
+        demo_pre_path
+            .as_ref()
+            .map(|node| node.data.as_str())
+            .unwrap_or("<unknown>")
+    );
+
+    image_network
+        .insert_image_from_file(demo_image_path.as_path(), &image_metadata, DendriteType::Token)
+        .unwrap_or_else(|error| {
+            panic!(
+                "cnn demo image insert should succeed for '{}': {}",
+                demo_image_path.display(),
+                error
+            )
+        });
+
+    let demo_post_path = image_network.enumerate_image_bytes_path(demo_image.as_slice()).0;
+    println!(
+        "    post-insert image path lookup -> {}",
+        demo_post_path
+            .as_ref()
+            .map(|node| node.data.as_str())
+            .unwrap_or("<unknown>")
+    );
+
     let image_pre = image_network.classify_pattern(&image_probes[0]);
     println!(
-        "    pre-train image probe -> {}",
+        "    pre-train cnn classifier probe -> {}",
         format_prediction(image_pre.as_ref())
     );
 
@@ -206,7 +259,7 @@ pub fn run_trainer_walkthrough() {
     print_confusion_matrix(&image_report.final_evaluation);
 
     println!(
-        "    post-train image probe -> {}",
+        "    post-train cnn classifier probe -> {}",
         format_prediction(image_report.probe_predictions[0].prediction.as_ref())
     );
 
