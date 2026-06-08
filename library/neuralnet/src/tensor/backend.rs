@@ -1,9 +1,41 @@
-use crate::tensor::device::BackendTrainingCapabilities;
-use crate::tensor::tensor4d::{Tensor4D, TensorError};
-use crate::tensor::offloading::{cpu_backend, cuda_backend, mlx_backend};
+use std::env;
 
-#[cfg(all(feature = "offloading-cuda", feature = "offloading-mlx"))]
-compile_error!("features 'offloading-cuda' and 'offloading-mlx' are mutually exclusive for active runtime backend selection");
+use crate::tensor::device::BackendTrainingCapabilities;
+use crate::tensor::offloading::{cpu_backend, cuda_backend, mlx_backend};
+use crate::tensor::tensor4d::{Tensor4D, TensorError};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TensorBackendKind {
+    Cpu,
+    Cuda,
+    Mlx,
+}
+
+impl TensorBackendKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::Cuda => "cuda",
+            Self::Mlx => "mlx",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "cpu" => Some(Self::Cpu),
+            "cuda" | "gpu" => Some(Self::Cuda),
+            "mlx" => Some(Self::Mlx),
+            "auto" | "default" | "" => None,
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ActiveBackendSelection {
+    kind: TensorBackendKind,
+    backend: &'static dyn TensorBackend,
+}
 
 pub trait TensorBackend: Send + Sync {
     fn name(&self) -> &'static str;
@@ -352,26 +384,73 @@ pub fn mlx_backend_available() -> bool {
     mlx_backend::mlx_backend_available()
 }
 
+pub fn preferred_backend_kind() -> Option<TensorBackendKind> {
+    env::var("NEURALNET_TENSOR_BACKEND")
+        .ok()
+        .or_else(|| env::var("NEURALNET_BACKEND").ok())
+        .and_then(|value| TensorBackendKind::parse(value.as_str()))
+}
+
+fn backend_for_kind(kind: TensorBackendKind) -> Option<ActiveBackendSelection> {
+    match kind {
+        TensorBackendKind::Cpu => {
+            static CPU: CpuTensorBackend = CpuTensorBackend;
+            Some(ActiveBackendSelection {
+                kind: TensorBackendKind::Cpu,
+                backend: &CPU,
+            })
+        }
+        TensorBackendKind::Cuda => {
+            #[cfg(feature = "offloading-cuda")]
+            {
+                if cuda_backend_available() {
+                    static CUDA: CudaTensorBackend = CudaTensorBackend;
+                    return Some(ActiveBackendSelection {
+                        kind: TensorBackendKind::Cuda,
+                        backend: &CUDA,
+                    });
+                }
+            }
+            None
+        }
+        TensorBackendKind::Mlx => {
+            #[cfg(feature = "offloading-mlx")]
+            {
+                if mlx_backend_available() {
+                    static MLX: MlxTensorBackend = MlxTensorBackend;
+                    return Some(ActiveBackendSelection {
+                        kind: TensorBackendKind::Mlx,
+                        backend: &MLX,
+                    });
+                }
+            }
+            None
+        }
+    }
+}
+
+fn resolve_active_backend() -> ActiveBackendSelection {
+    if let Some(preferred) = preferred_backend_kind()
+        && let Some(selection) = backend_for_kind(preferred)
+    {
+        return selection;
+    }
+
+    for fallback in [
+        TensorBackendKind::Cuda,
+        TensorBackendKind::Mlx,
+        TensorBackendKind::Cpu,
+    ] {
+        if let Some(selection) = backend_for_kind(fallback) {
+            return selection;
+        }
+    }
+
+    unreachable!("cpu backend must always be available")
+}
+
 pub fn active_backend() -> &'static dyn TensorBackend {
-
-    #[cfg(feature = "offloading-cuda")]
-    {
-        static CUDA: CudaTensorBackend = CudaTensorBackend;
-        return &CUDA;
-    }
-
-    #[cfg(all(not(feature = "offloading-cuda"), feature = "offloading-mlx"))]
-    {
-        static MLX: MlxTensorBackend = MlxTensorBackend;
-        return &MLX;
-    }
-
-    #[cfg(all(not(feature = "offloading-cuda"), not(feature = "offloading-mlx")))]
-    {
-        static CPU: CpuTensorBackend = CpuTensorBackend;
-        &CPU
-    }
-
+    resolve_active_backend().backend
 }
 
 pub fn active_backend_name() -> &'static str {
@@ -383,22 +462,20 @@ pub fn active_backend_training_capabilities() -> BackendTrainingCapabilities {
 }
 
 pub fn active_backend_label() -> &'static str {
-
-    #[cfg(feature = "offloading-cuda")]
-    {
-        return "cuda";
+    match resolve_active_backend().kind {
+        TensorBackendKind::Cpu => "cpu",
+        TensorBackendKind::Cuda => "cuda",
+        TensorBackendKind::Mlx => {
+            #[cfg(feature = "offloading-mlx")]
+            {
+                mlx_backend::mlx_backend_label()
+            }
+            #[cfg(not(feature = "offloading-mlx"))]
+            {
+                "mlx"
+            }
+        }
     }
-
-    #[cfg(all(not(feature = "offloading-cuda"), feature = "offloading-mlx"))]
-    {
-        return mlx_backend::mlx_backend_label();
-    }
-
-    #[cfg(all(not(feature = "offloading-cuda"), not(feature = "offloading-mlx")))]
-    {
-        "cpu"
-    }
-
 }
 
 #[cfg(test)]
