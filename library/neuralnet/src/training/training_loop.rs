@@ -616,14 +616,11 @@ mod tests {
             .unwrap_or_else(|err| panic!("failed to create checkpoint dir for brain corrupt test: {err}"));
 
         let network_for_paths = MultiModalNeuralNetwork::new_multimodal();
-        let (cognitive_path, memory_path, _classifier_path) =
-            network_for_paths.snapshot_paths_for_instance_in_dir("best", checkpoint_dir.as_path());
+        let bundle_path =
+            network_for_paths.snapshot_bundle_path_for_instance_in_dir("best", checkpoint_dir.as_path());
 
-        // MultiModalBrain checkpoints write two files per checkpoint id.
-        fs::write(cognitive_path, b"invalid-brain-checkpoint")
-        .unwrap_or_else(|err| panic!("failed to write corrupt cognitive checkpoint: {err}"));
-        fs::write(memory_path, b"invalid-brain-checkpoint")
-        .unwrap_or_else(|err| panic!("failed to write corrupt memory checkpoint: {err}"));
+        fs::write(bundle_path, b"invalid-brain-checkpoint")
+        .unwrap_or_else(|err| panic!("failed to write corrupt snapshot bundle: {err}"));
 
         let mut network = MultiModalNeuralNetwork::new_multimodal();
         let train = vec![
@@ -694,10 +691,10 @@ mod tests {
         assert!(!save_report.best_checkpoint_paths.is_empty());
 
         let network_for_paths = MultiModalNeuralNetwork::new_multimodal();
-        let (_cognitive_path, _memory_path, classifier_path) =
-            network_for_paths.snapshot_paths_for_instance_in_dir("best", checkpoint_dir.as_path());
-        fs::remove_file(&classifier_path)
-            .unwrap_or_else(|err| panic!("failed to remove classifier checkpoint file: {err}"));
+        let bundle_path =
+            network_for_paths.snapshot_bundle_path_for_instance_in_dir("best", checkpoint_dir.as_path());
+        fs::remove_file(&bundle_path)
+            .unwrap_or_else(|err| panic!("failed to remove snapshot bundle file: {err}"));
 
         let mut resumed_network = MultiModalNeuralNetwork::new_multimodal();
         let resume_config = TrainingLoopConfig {

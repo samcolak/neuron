@@ -62,8 +62,8 @@ fn run_stress_scenario(config: StressConfig, enable_snapshot: bool) -> StressRep
         let snapshot_id = "brain_stress_walkthrough";
         network.enable_auto_snapshot_in_dir(snapshot_id, snapshot_dir.as_path(), config.snapshot_every);
 
-        let (cognitive_path, memory_path, classifier_path) =
-            network.snapshot_paths_for_instance_in_dir(snapshot_id, snapshot_dir.as_path());
+        let bundle_path =
+            network.snapshot_bundle_path_for_instance_in_dir(snapshot_id, snapshot_dir.as_path());
 
         let insert_start = Instant::now();
         for idx in 0..config.insert_count {
@@ -79,8 +79,7 @@ fn run_stress_scenario(config: StressConfig, enable_snapshot: bool) -> StressRep
         let _ = network.flush_auto_snapshot();
         snapshot_pending = network.auto_snapshot_pending_inserts();
         snapshot_error = network.auto_snapshot_last_error().map(str::to_string);
-        snapshot_files_present =
-            cognitive_path.exists() && memory_path.exists() && classifier_path.exists();
+        snapshot_files_present = bundle_path.exists();
 
         let query_start = Instant::now();
         let mut score_sum = 0.0;

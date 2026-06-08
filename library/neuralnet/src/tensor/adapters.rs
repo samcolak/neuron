@@ -105,6 +105,24 @@ fn normalize(value: u8, normalize_pixels: bool) -> f32 {
     }
 }
 
+fn append_interleaved_as_nchw_f32(
+    image: &[u8],
+    height: usize,
+    width: usize,
+    channels: usize,
+    normalize_pixels: bool,
+    target: &mut Vec<f32>,
+) {
+    for channel in 0..channels {
+        for y in 0..height {
+            for x in 0..width {
+                let src_idx = ((y * width) + x) * channels + channel;
+                target.push(normalize(image[src_idx], normalize_pixels));
+            }
+        }
+    }
+}
+
 pub fn image_bytes_to_tensor_nchw(
     image: &[u8],
     height: usize,
@@ -140,14 +158,14 @@ pub fn image_bytes_to_tensor_nchw_with_channels(
     }
 
     let mut data: Vec<f32> = Vec::with_capacity(expected);
-    for channel in 0..channels {
-        for y in 0..height {
-            for x in 0..width {
-                let src_idx = ((y * width) + x) * channels + channel;
-                data.push(normalize(image[src_idx], normalize_pixels));
-            }
-        }
-    }
+    append_interleaved_as_nchw_f32(
+        image,
+        height,
+        width,
+        channels,
+        normalize_pixels,
+        &mut data,
+    );
 
     // Shape has already been validated against expected length.
     Tensor4D::from_vec(1, channels, height, width, data).map_err(|_| {
@@ -301,6 +319,93 @@ pub fn image_bytes_to_tensor_nchw_resized_with_channels(
 
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn image_batch_to_tensor_nchw_resized_with_channels(
+    images: &[Vec<u8>],
+    in_height: usize,
+    in_width: usize,
+    channels: usize,
+    out_height: usize,
+    out_width: usize,
+    normalize_pixels: bool,
+) -> Result<Tensor4D, TensorAdapterError> {
+    if images.is_empty() {
+        return Err(TensorAdapterError::EmptyBatch);
+    }
+
+    if channels == 0 {
+        return Err(TensorAdapterError::InvalidChannelCount { channels });
+    }
+
+    validate_image_dimensions(in_height, in_width)?;
+    validate_image_dimensions(out_height, out_width)?;
+
+    let expected_input = in_height
+        .saturating_mul(in_width)
+        .saturating_mul(channels);
+    let per_sample_output = out_height
+        .saturating_mul(out_width)
+        .saturating_mul(channels);
+
+    let mut data = Vec::with_capacity(images.len().saturating_mul(per_sample_output));
+
+    for (index, image) in images.iter().enumerate() {
+        if image.len() != expected_input {
+            return Err(TensorAdapterError::InconsistentImageSize {
+                index,
+                expected: expected_input,
+                actual: image.len(),
+            });
+        }
+
+        if channels == 1 {
+            let resized = crate::tensor::image_utils::resize_grayscale_nearest(
+                image,
+                in_height,
+                in_width,
+                out_height,
+                out_width,
+            )
+            .map_err(TensorAdapterError::from)?;
+
+            append_interleaved_as_nchw_f32(
+                resized.as_slice(),
+                out_height,
+                out_width,
+                1,
+                normalize_pixels,
+                &mut data,
+            );
+            continue;
+        }
+
+        let resized = resize_interleaved_nearest(
+            image,
+            in_height,
+            in_width,
+            channels,
+            out_height,
+            out_width,
+        );
+
+        append_interleaved_as_nchw_f32(
+            resized.as_slice(),
+            out_height,
+            out_width,
+            channels,
+            normalize_pixels,
+            &mut data,
+        );
+    }
+
+    Tensor4D::from_vec(images.len(), channels, out_height, out_width, data).map_err(|_| {
+        TensorAdapterError::InvalidImageSize {
+            expected: images.len().saturating_mul(per_sample_output),
+            actual: images.len().saturating_mul(per_sample_output),
+        }
+    })
+}
+
 pub fn multimodal_input_to_tensor_nchw_resized(
     input: &MultiModalInput,
     in_height: usize,
@@ -408,6 +513,41 @@ mod tests {
         assert_eq!(tensor.get(0, 0, 0, 0), Ok(10.0));
         assert_eq!(tensor.get(0, 1, 0, 0), Ok(11.0));
         assert_eq!(tensor.get(0, 2, 0, 0), Ok(12.0));
+    }
+
+    #[test]
+    fn image_adapter_resizes_rgb_batch_to_nchw() {
+        let image_a = vec![
+            10u8, 11u8, 12u8,
+            20u8, 21u8, 22u8,
+            30u8, 31u8, 32u8,
+            40u8, 41u8, 42u8,
+        ];
+        let image_b = vec![
+            50u8, 51u8, 52u8,
+            60u8, 61u8, 62u8,
+            70u8, 71u8, 72u8,
+            80u8, 81u8, 82u8,
+        ];
+
+        let tensor = image_batch_to_tensor_nchw_resized_with_channels(
+            &[image_a, image_b],
+            2,
+            2,
+            3,
+            1,
+            1,
+            false,
+        )
+        .unwrap_or_else(|_| panic!("rgb batch resized tensor conversion should succeed"));
+
+        assert_eq!(tensor.shape(), (2, 3, 1, 1));
+        assert_eq!(tensor.get(0, 0, 0, 0), Ok(10.0));
+        assert_eq!(tensor.get(0, 1, 0, 0), Ok(11.0));
+        assert_eq!(tensor.get(0, 2, 0, 0), Ok(12.0));
+        assert_eq!(tensor.get(1, 0, 0, 0), Ok(50.0));
+        assert_eq!(tensor.get(1, 1, 0, 0), Ok(51.0));
+        assert_eq!(tensor.get(1, 2, 0, 0), Ok(52.0));
     }
 
     #[test]

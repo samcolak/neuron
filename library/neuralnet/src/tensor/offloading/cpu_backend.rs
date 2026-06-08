@@ -1,4 +1,5 @@
 use crate::tensor::backend::TensorBackend;
+use crate::tensor::device::BackendTrainingCapabilities;
 use crate::tensor::tensor4d::{Tensor4D, TensorError};
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -8,6 +9,10 @@ impl TensorBackend for CpuTensorBackend {
     
     fn name(&self) -> &'static str {
         "cpu"
+    }
+
+    fn training_capabilities(&self) -> BackendTrainingCapabilities {
+        BackendTrainingCapabilities::host_only()
     }
 
     fn conv2d_valid(

@@ -151,9 +151,8 @@ impl TrainableModel for MultiModalBrain {
 
     fn save_checkpoint(&self, checkpoint_id: &str, dir: &Path) -> io::Result<Vec<PathBuf>> {
         self.snapshot_instance_in_dir(checkpoint_id, dir)?;
-        let (cognitive, memory, classifier) =
-            self.snapshot_paths_for_instance_in_dir(checkpoint_id, dir);
-        Ok(vec![cognitive, memory, classifier])
+        let bundle = self.snapshot_bundle_path_for_instance_in_dir(checkpoint_id, dir);
+        Ok(vec![bundle])
     }
 
     fn load_checkpoint(&mut self, checkpoint_id: &str, dir: &Path) -> io::Result<()> {

@@ -17,7 +17,9 @@ use neuralnet::cnn::data_pipeline::{
     ImageTransformPipeline,
 };
 use neuralnet::tensor::backend::active_backend_label;
+use neuralnet::tensor::backend::{mlx_backprop_path_reset, mlx_backprop_path_snapshot};
 use neuralnet::training::linear_head::LinearOptimizer;
+use std::env;
 use std::time::Instant;
 
 #[derive(Debug, Clone)]
@@ -487,7 +489,31 @@ fn collect_large_benchmark_summary() -> LargeBenchmarkSummary {
 
 pub fn run_cnn_classifier_walkthrough() {
     println!("\nCNN classifier walkthrough");
-    println!("  tensor backend in use: {}", active_backend_label());
+    let backend_label = active_backend_label();
+    println!("  tensor backend in use: {}", backend_label);
+
+    if backend_label.starts_with("mlx") {
+        let allow_cpu_fallback = env::var("NEURALNET_ALLOW_CPU_FALLBACK")
+            .or_else(|_| env::var("NEURALNET_MLX_ALLOW_CPU_FALLBACK"))
+            .ok()
+            .map(|value| {
+                let normalized = value.trim().to_ascii_lowercase();
+                normalized == "1"
+                    || normalized == "true"
+                    || normalized == "yes"
+                    || normalized == "on"
+            })
+            .unwrap_or(true);
+        println!(
+            "  mlx cpu fallback policy: {}",
+            if allow_cpu_fallback {
+                "enabled (default)"
+            } else {
+                "disabled (device-only strict mode)"
+            }
+        );
+        mlx_backprop_path_reset();
+    }
 
     let mut classifier = CnnImageClassifier::new(
         vec!["animal_cat".to_string(), "animal_dog".to_string()],
@@ -721,6 +747,45 @@ pub fn run_cnn_classifier_walkthrough() {
         large_benchmark.update_ms,
         large_benchmark.flush_ms,
     );
+
+    if backend_label.starts_with("mlx") {
+        let backprop = mlx_backprop_path_snapshot();
+        println!(
+            "  mlx backprop path: total={} native_success={} cpu_fallback={} native_success_ratio={:.2}",
+            backprop.total_calls,
+            backprop.full_native_success,
+            backprop.full_cpu_fallback,
+            backprop.full_native_success_ratio(),
+        );
+        println!(
+            "  mlx fallback reasons: batch_split_disabled={} incompatible_shapes={} shape_mismatch={} invalid_argument={} other={}",
+            backprop.fallback_batch_split_disabled,
+            backprop.fallback_incompatible_shapes,
+            backprop.fallback_shape_mismatch,
+            backprop.fallback_invalid_argument,
+            backprop.fallback_other,
+        );
+        println!(
+            "  mlx native stages: dW intended={} executed={} fallback={} dInput intended={} executed={} fallback={}",
+            backprop.intended_native_dw,
+            backprop.executed_native_dw,
+            backprop.fallback_dw,
+            backprop.intended_native_dinput,
+            backprop.executed_native_dinput,
+            backprop.fallback_dinput,
+        );
+        println!(
+            "  mlx native stage time: dW={:.3}ms dInput={:.3}ms",
+            backprop.native_dw_time_ns as f64 / 1_000_000.0,
+            backprop.native_dinput_time_ns as f64 / 1_000_000.0,
+        );
+        println!(
+            "  mlx native dW breakdown: transpose={:.3}ms conv={:.3}ms materialize={:.3}ms",
+            backprop.native_dw_transpose_time_ns as f64 / 1_000_000.0,
+            backprop.native_dw_conv_time_ns as f64 / 1_000_000.0,
+            backprop.native_dw_materialize_time_ns as f64 / 1_000_000.0,
+        );
+    }
 
     let _ = diagonal_gradient_image_8x8();
 }

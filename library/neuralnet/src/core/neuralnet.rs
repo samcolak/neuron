@@ -13,6 +13,9 @@ use std::collections::{HashMap, HashSet};
 
 // code for the core data structures and logic of the neural network
 
+const CANDIDATE_SCAN_LIMIT: usize = 512;
+const CANDIDATE_ACCEPT_LIMIT: usize = 128;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NeuralNetwork<C, N>
 where
@@ -20,9 +23,9 @@ where
     N: NetworkNode,
 {
     dendrites: HashMap<String, N>,
-    #[serde(skip, default)]
+    #[serde(default)]
     token_index: HashMap<String, Vec<String>>,
-    #[serde(skip, default)]
+    #[serde(default)]
     token_cluster_index: HashMap<String, Vec<String>>,
     #[serde(skip, default)]
     controller: C,
@@ -73,6 +76,55 @@ where
     C: NodeNetworkController,
     N: NetworkNode + Clone + Serialize + DeserializeOwned,
 {
+
+    fn best_match_score_for_token(&self, token_key: &str) -> f64 {
+
+        if self
+            .token_index
+            .get(token_key)
+            .is_some_and(|matches| !matches.is_empty())
+        {
+            return 1.0;
+        }
+
+        let Some(cluster_key) = self.controller.cluster_key_for_token(token_key) else {
+            return 0.0;
+        };
+
+        let Some(cluster_matches) = self.token_cluster_index.get(&cluster_key) else {
+            return 0.0;
+        };
+
+        let mut best_score = 0.0;
+
+        for uid in cluster_matches.iter().take(CANDIDATE_SCAN_LIMIT) {
+
+            let Some(candidate) = self.dendrites.get(uid) else {
+                continue;
+            };
+
+            let candidate_key_owned;
+            let candidate_key = if candidate.normalized_key().is_empty() {
+                candidate_key_owned = self.token_key_for_index(candidate.data());
+                candidate_key_owned.as_str()
+            } else {
+                candidate.normalized_key()
+            };
+
+            let (score, _) = self.controller.evaluate_match(token_key, candidate_key);
+            if score > best_score {
+                best_score = score;
+            }
+            if best_score >= 0.999 {
+                break;
+            }
+            
+        }
+
+        best_score
+
+    }
+
     pub(crate) fn token_key_for_index(&self, data: &str) -> String {
         self.controller.normalize_token(data)
     }
@@ -99,29 +151,32 @@ where
             return CandidateUidSet::Owned(Vec::new());
         };
 
-        CandidateUidSet::Owned(
-            cluster_matches
-                .iter()
-                .filter_map(|uid| {
-                    let candidate = self.dendrites.get(uid)?;
-                    let candidate_key_owned;
-                    let candidate_key = if candidate.normalized_key().is_empty() {
-                        candidate_key_owned = self.token_key_for_index(candidate.data());
-                        candidate_key_owned.as_str()
-                    } else {
-                        candidate.normalized_key()
-                    };
+        let mut accepted = Vec::new();
 
-                    let (score, _) = self.controller.evaluate_match(token_key, candidate_key);
+        for uid in cluster_matches.iter().take(CANDIDATE_SCAN_LIMIT) {
+            let Some(candidate) = self.dendrites.get(uid) else {
+                continue;
+            };
 
-                    if score >= 0.60 {
-                        Some(uid.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect(),
-        )
+            let candidate_key_owned;
+            let candidate_key = if candidate.normalized_key().is_empty() {
+                candidate_key_owned = self.token_key_for_index(candidate.data());
+                candidate_key_owned.as_str()
+            } else {
+                candidate.normalized_key()
+            };
+
+            let (score, _) = self.controller.evaluate_match(token_key, candidate_key);
+
+            if score >= 0.60 {
+                accepted.push(uid.clone());
+                if accepted.len() >= CANDIDATE_ACCEPT_LIMIT {
+                    break;
+                }
+            }
+        }
+
+        CandidateUidSet::Owned(accepted)
     }
 
     pub(crate) fn fuzzy_success_score_for_content(&self, content: &C::Content) -> f64 {
@@ -139,32 +194,10 @@ where
                 continue;
             }
 
-            let candidates = self.candidate_uids_for_token(&token_key);
-            let candidate_slice = candidates.as_slice();
-            if candidate_slice.is_empty() {
+            let token_best = self.best_match_score_for_token(&token_key);
+            if token_best <= 0.0 {
                 best_scores.push(0.0);
                 continue;
-            }
-
-            let mut token_best = 0.0;
-
-            for candidate_uid in candidate_slice {
-                let Some(candidate) = self.dendrites.get(candidate_uid) else {
-                    continue;
-                };
-
-                let candidate_key_owned;
-                let candidate_key = if candidate.normalized_key().is_empty() {
-                    candidate_key_owned = self.token_key_for_index(candidate.data());
-                    candidate_key_owned.as_str()
-                } else {
-                    candidate.normalized_key()
-                };
-
-                let (score, _) = self.controller.evaluate_match(&token_key, candidate_key);
-                if score > token_best {
-                    token_best = score;
-                }
             }
 
             best_scores.push(token_best);

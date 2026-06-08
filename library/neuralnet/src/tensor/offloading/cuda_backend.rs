@@ -3,6 +3,7 @@ use crate::tensor::backend::{
     ConvBlockBackwardGradients,
     TensorBackend,
 };
+use crate::tensor::device::BackendTrainingCapabilities;
 use crate::tensor::tensor4d::{Tensor4D, TensorError};
 
 #[cfg(feature = "offloading-cuda")]
@@ -16,6 +17,26 @@ use std::collections::HashMap;
 #[cfg(feature = "offloading-cuda")]
 use std::sync::{Arc, Mutex, OnceLock};
 
+#[cfg(feature = "offloading-cuda")]
+static CUDA_ALLOW_CPU_FALLBACK: OnceLock<bool> = OnceLock::new();
+
+#[cfg(feature = "offloading-cuda")]
+fn cuda_allow_cpu_fallback() -> bool {
+    *CUDA_ALLOW_CPU_FALLBACK.get_or_init(|| {
+        std::env::var("NEURALNET_ALLOW_CPU_FALLBACK")
+            .or_else(|_| std::env::var("NEURALNET_CUDA_ALLOW_CPU_FALLBACK"))
+            .ok()
+            .map(|value| {
+                let normalized = value.trim().to_ascii_lowercase();
+                normalized == "1"
+                    || normalized == "true"
+                    || normalized == "yes"
+                    || normalized == "on"
+            })
+            .unwrap_or(true)
+    })
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CudaTensorBackend;
 
@@ -23,6 +44,10 @@ impl TensorBackend for CudaTensorBackend {
 
     fn name(&self) -> &'static str {
         "cuda"
+    }
+
+    fn training_capabilities(&self) -> BackendTrainingCapabilities {
+        BackendTrainingCapabilities::native_compute_host_training()
     }
 
     fn conv2d_valid(
@@ -142,16 +167,34 @@ fn cuda_conv_block_backward_gradients_fallback(
 ) -> Result<ConvBlockBackwardGradients, TensorError> {
     #[cfg(feature = "offloading-cuda")]
     {
-        if let Ok(result) = cuda_conv_block_backward_gradients_kernel(
-            kernels,
-            input,
-            conv_pre_activation,
-            pool_indices,
-            pooled_shape,
-            pooled_grad,
-            compute_input_grad,
-        ) {
+        let native_result = if pooled_shape.0 > 1 {
+            cuda_conv_block_backward_gradients_native_batched_by_sample(
+                kernels,
+                input,
+                conv_pre_activation,
+                pool_indices,
+                pooled_shape,
+                pooled_grad,
+                compute_input_grad,
+            )
+        } else {
+            cuda_conv_block_backward_gradients_kernel(
+                kernels,
+                input,
+                conv_pre_activation,
+                pool_indices,
+                pooled_shape,
+                pooled_grad,
+                compute_input_grad,
+            )
+        };
+
+        if let Ok(result) = native_result {
             return Ok(result);
+        }
+
+        if !cuda_allow_cpu_fallback() {
+            return native_result;
         }
     }
 
@@ -164,6 +207,141 @@ fn cuda_conv_block_backward_gradients_fallback(
         pooled_grad,
         compute_input_grad,
     )
+}
+
+#[cfg(feature = "offloading-cuda")]
+fn tensor4d_sample(input: &Tensor4D, sample_idx: usize) -> Result<Tensor4D, TensorError> {
+    let (n, c, h, w) = input.shape();
+    if sample_idx >= n {
+        return Err(TensorError::InvalidArgument(
+            "sample index out of bounds while splitting batched tensor",
+        ));
+    }
+
+    let per_sample = c
+        .checked_mul(h)
+        .and_then(|v| v.checked_mul(w))
+        .ok_or(TensorError::InvalidArgument("sample shape overflow"))?;
+    let start = sample_idx
+        .checked_mul(per_sample)
+        .ok_or(TensorError::InvalidArgument("sample offset overflow"))?;
+    let end = start
+        .checked_add(per_sample)
+        .ok_or(TensorError::InvalidArgument("sample end overflow"))?;
+
+    Tensor4D::from_vec(1, c, h, w, input.as_slice()[start..end].to_vec())
+}
+
+#[cfg(feature = "offloading-cuda")]
+#[allow(clippy::too_many_arguments)]
+fn cuda_conv_block_backward_gradients_native_batched_by_sample(
+    kernels: &Tensor4D,
+    input: &Tensor4D,
+    conv_pre_activation: &Tensor4D,
+    pool_indices: &[(usize, usize)],
+    pooled_shape: (usize, usize, usize, usize),
+    pooled_grad: &Tensor4D,
+    compute_input_grad: bool,
+) -> Result<ConvBlockBackwardGradients, TensorError> {
+    let (batch, channels, pooled_h, pooled_w) = pooled_shape;
+    let pooled_grad_shape = pooled_grad.shape();
+    if pooled_grad_shape != pooled_shape {
+        return Err(TensorError::IncompatibleShapes {
+            left: pooled_shape,
+            right: pooled_grad_shape,
+        });
+    }
+
+    let (input_batch, input_channels, in_h, in_w) = input.shape();
+    let (conv_batch, conv_channels, relu_h, relu_w) = conv_pre_activation.shape();
+    if input_batch != batch || conv_batch != batch || conv_channels != channels {
+        return Err(TensorError::IncompatibleShapes {
+            left: pooled_shape,
+            right: conv_pre_activation.shape(),
+        });
+    }
+
+    let per_sample_indices = channels
+        .checked_mul(pooled_h)
+        .and_then(|v| v.checked_mul(pooled_w))
+        .ok_or(TensorError::InvalidArgument("pool index shape overflow"))?;
+    let expected_pool_indices = batch
+        .checked_mul(per_sample_indices)
+        .ok_or(TensorError::InvalidArgument("pool index shape overflow"))?;
+    if pool_indices.len() != expected_pool_indices {
+        return Err(TensorError::ShapeMismatch {
+            expected: expected_pool_indices,
+            actual: pool_indices.len(),
+        });
+    }
+
+    let per_sample_input = input_channels
+        .checked_mul(in_h)
+        .and_then(|v| v.checked_mul(in_w))
+        .ok_or(TensorError::InvalidArgument("input sample shape overflow"))?;
+
+    let mut kernel_grad = Tensor4D::zeros(
+        kernels.shape().0,
+        kernels.shape().1,
+        kernels.shape().2,
+        kernels.shape().3,
+    );
+    let mut bias_grad = vec![0.0f32; channels];
+    let mut input_grad = if compute_input_grad {
+        Some(Tensor4D::zeros(batch, input_channels, in_h, in_w))
+    } else {
+        None
+    };
+
+    for sample_idx in 0..batch {
+        let input_sample = tensor4d_sample(input, sample_idx)?;
+        let conv_pre_sample = tensor4d_sample(conv_pre_activation, sample_idx)?;
+        let pooled_grad_sample = tensor4d_sample(pooled_grad, sample_idx)?;
+
+        let idx_start = sample_idx
+            .checked_mul(per_sample_indices)
+            .ok_or(TensorError::InvalidArgument("pool index offset overflow"))?;
+        let idx_end = idx_start
+            .checked_add(per_sample_indices)
+            .ok_or(TensorError::InvalidArgument("pool index end overflow"))?;
+        let sample_pool_indices = &pool_indices[idx_start..idx_end];
+
+        let sample_backward = cuda_conv_block_backward_gradients_kernel(
+            kernels,
+            &input_sample,
+            &conv_pre_sample,
+            sample_pool_indices,
+            (1, channels, pooled_h, pooled_w),
+            &pooled_grad_sample,
+            compute_input_grad,
+        )?;
+
+        kernel_grad.add_inplace(&sample_backward.kernel_grad)?;
+        for (accum, grad) in bias_grad.iter_mut().zip(sample_backward.bias_grad.iter()) {
+            *accum += *grad;
+        }
+
+        if let (Some(total_input_grad), Some(sample_input_grad)) =
+            (input_grad.as_mut(), sample_backward.input_grad.as_ref())
+        {
+            let start = sample_idx
+                .checked_mul(per_sample_input)
+                .ok_or(TensorError::InvalidArgument("input grad offset overflow"))?;
+            let end = start
+                .checked_add(per_sample_input)
+                .ok_or(TensorError::InvalidArgument("input grad end overflow"))?;
+            total_input_grad.as_mut_slice()[start..end]
+                .copy_from_slice(sample_input_grad.as_slice());
+        }
+    }
+
+    let _ = (relu_h, relu_w);
+
+    Ok(ConvBlockBackwardGradients {
+        kernel_grad,
+        bias_grad,
+        input_grad,
+    })
 }
 
 pub fn cuda_backend() -> CudaTensorBackend {

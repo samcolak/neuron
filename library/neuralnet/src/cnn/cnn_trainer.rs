@@ -53,20 +53,24 @@ pub struct CnnScaleTrainConfig {
 }
 
 impl CnnScaleTrainConfig {
+
     pub fn effective_batch_size(&self) -> usize {
         self.micro_batch_size
             .max(1)
             .saturating_mul(self.accumulation_steps.max(1))
     }
+
 }
 
 impl Default for CnnScaleTrainConfig {
+
     fn default() -> Self {
         Self {
             micro_batch_size: 1,
             accumulation_steps: 1,
         }
     }
+
 }
 
 #[derive(Debug, Clone, Default)]
@@ -86,6 +90,7 @@ pub struct CnnScaleTrainReport {
 }
 
 fn pop_prefix(samples: &mut Vec<Vec<u8>>, prefix_len: usize) -> Vec<Vec<u8>> {
+
     let take = prefix_len.min(samples.len());
     if take == 0 {
         return Vec::new();
@@ -99,6 +104,7 @@ fn pop_prefix(samples: &mut Vec<Vec<u8>>, prefix_len: usize) -> Vec<Vec<u8>> {
     }
 
     samples.drain(..take).collect()
+    
 }
 
 impl CnnImageClassifier {
@@ -250,6 +256,7 @@ impl CnnImageClassifier {
         pipeline: &ImageTransformPipeline,
         seed: u64,
     ) -> TrainerEvaluationReport {
+
         let mut report = TrainerEvaluationReport {
             total_samples: samples.len(),
             ..TrainerEvaluationReport::default()
@@ -307,6 +314,7 @@ impl CnnImageClassifier {
 
         compute_quality_metrics(&mut report);
         report
+
     }
 
     pub fn train_labeled_image_batches(&mut self, batches: &[CnnTrainerBatch]) -> TrainerBatchReport {

@@ -3,14 +3,29 @@ use std::fs;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::cell::RefCell;
 
 use crate::cnn::feature_extractor::CnnFeatureExtractor;
-use crate::core::nodenet::{NodeMetadata, NodeNetwork, NodePayload};
+use crate::core::nodenet::{NodeMetadata, NodeNetwork};
+use crate::core::snapshot_writer::{
+    latest_snapshot_write_error,
+    submit_snapshot_write,
+    wait_for_snapshot_write,
+    write_snapshot_bytes_to_path,
+};
+use crate::core::transaction_log::{
+    append_transaction,
+    flush_transactions,
+    latest_transaction_error,
+    load_and_sanitize_transaction_log,
+    truncate_transaction_log,
+    TransactionOperation,
+    TransactionTarget,
+};
 use crate::helpers::image_io::{ImageIoError, load_png_or_jpeg_from_path};
-use crate::helpers::multimodal_controller::{MultiModalController, MultiModalInput};
+use crate::helpers::multimodal_controller::MultiModalInput;
 use crate::helpers::multimodal_neuralnet::MultiModalSubNetwork;
-use crate::helpers::axon::Axon;
 use crate::helpers::pattern_classifier::{ClassificationResult, PatternClassifier};
 use crate::dendrites::text_dendrite::DendriteType;
 use crate::dendrites::multimodal_dendrite::MultimodalDendrite;
@@ -42,8 +57,7 @@ pub struct SnapshotLoadStatus {
     pub classifier_loaded: bool,
 }
 
-const MULTIMODAL_BIN_MAGIC_V1: [u8; 4] = *b"MMB1";
-const MULTIMODAL_BIN_MAGIC_V2: [u8; 4] = *b"MMB2";
+const BRAIN_SNAPSHOT_BIN_MAGIC_V1: [u8; 4] = *b"BSP1";
 
 #[derive(Debug, Clone, Default)]
 struct AutoSnapshotPolicy {
@@ -51,75 +65,78 @@ struct AutoSnapshotPolicy {
     dir: Option<PathBuf>,
     every_n_inserts: usize,
     pending_inserts: usize,
+    last_enqueued_generation: u64,
+    worker_key: Option<String>,
     last_error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct LegacyMultimodalDendriteV1 {
-    uid: String,
-    connections: Vec<Axon>,
-    data: String,
-    modality: String,
-    metadata: NodeMetadata,
-    dendrite_type: DendriteType,
-    #[serde(skip, default)]
-    normalized_key: String,
-    #[serde(skip, default)]
-    connection_index: HashMap<String, usize>,
+#[derive(Debug, Clone, Default)]
+struct AutoTransactionLogPolicy {
+    instance_id: Option<String>,
+    dir: Option<PathBuf>,
+    last_enqueued_sequence: u64,
+    worker_key: Option<String>,
+    last_error: Option<String>,
+    replay_in_progress: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct LegacyMultiModalSubNetworkV1 {
-    dendrites: HashMap<String, LegacyMultimodalDendriteV1>,
-    #[serde(skip, default)]
-    token_index: HashMap<String, Vec<String>>,
-    #[serde(skip, default)]
-    token_cluster_index: HashMap<String, Vec<String>>,
-    #[serde(skip, default)]
-    controller: MultiModalController,
+#[derive(Debug, Clone, Default)]
+struct QueryScoreCache {
+    capacity: usize,
+    map: HashMap<String, f64>,
+    order: VecDeque<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct MultiModalSubNetworkSerdeBridge {
-    dendrites: HashMap<String, MultimodalDendrite>,
-    #[serde(skip, default)]
-    token_index: HashMap<String, Vec<String>>,
-    #[serde(skip, default)]
-    token_cluster_index: HashMap<String, Vec<String>>,
-    #[serde(skip, default)]
-    controller: MultiModalController,
-}
-
-impl From<LegacyMultimodalDendriteV1> for MultimodalDendrite {
-    fn from(value: LegacyMultimodalDendriteV1) -> Self {
+impl QueryScoreCache {
+    fn with_capacity(capacity: usize) -> Self {
         Self {
-            uid: value.uid,
-            connections: value.connections,
-            data: NodePayload::Text(value.data),
-            modality: value.modality,
-            metadata: value.metadata,
-            dendrite_type: value.dendrite_type,
-            normalized_key: value.normalized_key,
-            connection_index: value.connection_index,
+            capacity: capacity.max(1),
+            map: HashMap::new(),
+            order: VecDeque::new(),
         }
+    }
+
+    fn get(&mut self, key: &str) -> Option<f64> {
+        let value = self.map.get(key).copied()?;
+        self.touch_key(key);
+        Some(value)
+    }
+
+    fn insert(&mut self, key: String, value: f64) {
+        if self.map.contains_key(&key) {
+            self.map.insert(key.clone(), value);
+            self.touch_key(key.as_str());
+            return;
+        }
+
+        self.map.insert(key.clone(), value);
+        self.order.push_back(key);
+
+        while self.map.len() > self.capacity {
+            if let Some(oldest) = self.order.pop_front() {
+                self.map.remove(oldest.as_str());
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.map.clear();
+        self.order.clear();
+    }
+
+    fn touch_key(&mut self, key: &str) {
+        if let Some(index) = self.order.iter().position(|existing| existing == key) {
+            let _ = self.order.remove(index);
+        }
+        self.order.push_back(key.to_string());
     }
 }
 
-impl From<LegacyMultiModalSubNetworkV1> for MultiModalSubNetworkSerdeBridge {
-    fn from(value: LegacyMultiModalSubNetworkV1) -> Self {
-        let mut upgraded = HashMap::new();
-
-        for (uid, node) in value.dendrites {
-            upgraded.insert(uid, node.into());
-        }
-
-        Self {
-            dendrites: upgraded,
-            token_index: value.token_index,
-            token_cluster_index: value.token_cluster_index,
-            controller: value.controller,
-        }
-    }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BrainSnapshotBundleV1 {
+    cognitive_net: MultiModalSubNetwork,
+    memory_net: MultiModalSubNetwork,
+    classifier: PatternClassifier,
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +146,9 @@ pub struct MultiModalBrain {
     classifier: PatternClassifier,
     image_feature_extractor: Option<CnnFeatureExtractor>,
     auto_snapshot: AutoSnapshotPolicy,
+    transaction_log: AutoTransactionLogPolicy,
+    query_cache_enabled: bool,
+    query_score_cache: RefCell<QueryScoreCache>,
 }
 
 pub type MultiModalNeuralNetwork = MultiModalBrain;
@@ -142,7 +162,20 @@ impl MultiModalBrain {
             classifier: PatternClassifier::new(),
             image_feature_extractor: None,
             auto_snapshot: AutoSnapshotPolicy::default(),
+            transaction_log: AutoTransactionLogPolicy::default(),
+            query_cache_enabled: false,
+            query_score_cache: RefCell::new(QueryScoreCache::with_capacity(4_096)),
         }
+    }
+
+    pub fn enable_query_score_cache(&mut self, capacity: usize) {
+        self.query_cache_enabled = true;
+        self.query_score_cache = RefCell::new(QueryScoreCache::with_capacity(capacity));
+    }
+
+    pub fn disable_query_score_cache(&mut self) {
+        self.query_cache_enabled = false;
+        self.invalidate_query_cache();
     }
 
     pub fn enable_auto_snapshot(&mut self, instance_id: &str, every_n_inserts: usize) {
@@ -150,7 +183,10 @@ impl MultiModalBrain {
         self.auto_snapshot.dir = None;
         self.auto_snapshot.every_n_inserts = every_n_inserts.max(1);
         self.auto_snapshot.pending_inserts = 0;
+        self.auto_snapshot.last_enqueued_generation = 0;
+        self.auto_snapshot.worker_key = None;
         self.auto_snapshot.last_error = None;
+        self.configure_transaction_log_for_instance(instance_id, None);
     }
 
     pub fn enable_auto_snapshot_in_dir(
@@ -159,25 +195,62 @@ impl MultiModalBrain {
         dir: &Path,
         every_n_inserts: usize,
     ) {
+
         self.auto_snapshot.instance_id = Some(instance_id.trim().to_string());
         self.auto_snapshot.dir = Some(dir.to_path_buf());
         self.auto_snapshot.every_n_inserts = every_n_inserts.max(1);
         self.auto_snapshot.pending_inserts = 0;
+        self.auto_snapshot.last_enqueued_generation = 0;
+        self.auto_snapshot.worker_key = None;
         self.auto_snapshot.last_error = None;
+        self.configure_transaction_log_for_instance(instance_id, Some(dir.to_path_buf()));
     }
 
     pub fn disable_auto_snapshot(&mut self) {
         self.auto_snapshot = AutoSnapshotPolicy::default();
+        self.transaction_log = AutoTransactionLogPolicy::default();
+    }
+
+    fn invalidate_query_cache(&self) {
+        if !self.query_cache_enabled {
+            return;
+        }
+        let mut cache = self.query_score_cache.borrow_mut();
+        cache.clear();
     }
 
     pub fn flush_auto_snapshot(&mut self) -> io::Result<bool> {
-        if self.auto_snapshot.instance_id.is_none() || self.auto_snapshot.pending_inserts == 0 {
+        if self.auto_snapshot.instance_id.is_none()
+            || (self.auto_snapshot.pending_inserts == 0
+                && self.auto_snapshot.last_enqueued_generation == 0)
+        {
             return Ok(false);
         }
 
-        self.persist_auto_snapshot_now()?;
+        self.flush_transaction_log()?;
+
+        let Some((worker_key, bundle_path)) = self.auto_snapshot_target_paths() else {
+            return Ok(false);
+        };
+
+        let generation = self.submit_snapshot_bundle_write(worker_key.clone(), bundle_path)?;
+        let Some(active_worker_key) = self.auto_snapshot.worker_key.as_deref() else {
+            return Err(io::Error::other(
+                "snapshot worker key missing after enqueue",
+            ));
+        };
+
+        wait_for_snapshot_write(active_worker_key, generation)?;
+        self.auto_snapshot.last_error = latest_snapshot_write_error(active_worker_key);
+
         self.auto_snapshot.pending_inserts = 0;
-        self.auto_snapshot.last_error = None;
+        if self.auto_snapshot.last_error.is_none() {
+            self.auto_snapshot.last_enqueued_generation = generation;
+            if let Some((_, log_path)) = self.transaction_log_target_paths() {
+                truncate_transaction_log(log_path.as_path())?;
+                self.transaction_log.last_enqueued_sequence = 0;
+            }
+        }
 
         Ok(true)
     }
@@ -190,16 +263,128 @@ impl MultiModalBrain {
         self.auto_snapshot.last_error.as_deref()
     }
 
-    fn persist_auto_snapshot_now(&self) -> io::Result<()> {
-        let Some(instance_id) = self.auto_snapshot.instance_id.as_deref() else {
-            return Ok(());
+    fn configure_transaction_log_for_instance(&mut self, instance_id: &str, dir: Option<PathBuf>) {
+        self.transaction_log.instance_id = Some(instance_id.trim().to_string());
+        self.transaction_log.dir = dir;
+        self.transaction_log.last_enqueued_sequence = 0;
+        self.transaction_log.worker_key = None;
+        self.transaction_log.last_error = None;
+        self.transaction_log.replay_in_progress = false;
+    }
+
+    fn flush_transaction_log(&mut self) -> io::Result<bool> {
+
+        if self.transaction_log.replay_in_progress {
+            return Ok(false);
+        }
+
+        let Some(worker_key) = self.transaction_log.worker_key.as_deref() else {
+            return Ok(false);
         };
 
-        if let Some(dir) = self.auto_snapshot.dir.as_deref() {
-            self.snapshot_instance_in_dir(instance_id, dir)
-        } else {
-            self.snapshot_instance(instance_id)
+        let target_sequence = self.transaction_log.last_enqueued_sequence;
+        if target_sequence == 0 {
+            return Ok(false);
         }
+
+        flush_transactions(worker_key, target_sequence)?;
+        self.transaction_log.last_error = latest_transaction_error(worker_key);
+        Ok(true)
+
+    }
+
+    fn auto_snapshot_target_paths(&self) -> Option<(String, PathBuf)> {
+        
+        let instance_id = self.auto_snapshot.instance_id.as_deref()?;
+
+        let bundle_path = if let Some(dir) = self.auto_snapshot.dir.as_deref() {
+            snapshot_bundle_path_for_instance(instance_id, Some(dir))
+        } else {
+            snapshot_bundle_path_for_instance(instance_id, None)
+        };
+
+        let worker_key = bundle_path.to_string_lossy().to_string();
+        Some((worker_key, bundle_path))
+
+    }
+
+    fn transaction_log_target_paths(&self) -> Option<(String, PathBuf)> {
+
+        let instance_id = self.transaction_log.instance_id.as_deref()?;
+
+        let log_path = if let Some(dir) = self.transaction_log.dir.as_deref() {
+            transaction_log_path_for_instance(instance_id, Some(dir))
+        } else {
+            transaction_log_path_for_instance(instance_id, None)
+        };
+
+        let worker_key = log_path.to_string_lossy().to_string();
+        Some((worker_key, log_path))
+
+    }
+
+    fn append_transaction_operation(&mut self, operation: TransactionOperation) {
+
+        if self.transaction_log.replay_in_progress {
+            return;
+        }
+
+        let Some((worker_key, log_path)) = self.transaction_log_target_paths() else {
+            return;
+        };
+
+        let sequence = append_transaction(worker_key.clone(), log_path, operation);
+        self.transaction_log.worker_key = Some(worker_key.clone());
+        self.transaction_log.last_enqueued_sequence = sequence;
+        self.transaction_log.last_error = latest_transaction_error(worker_key.as_str());
+
+    }
+
+    fn query_cache_key(content: &MultiModalInput) -> Option<String> {
+
+        match content {
+            
+            MultiModalInput::Text(text) => {
+                let normalized = text.trim().to_ascii_lowercase();
+                if normalized.is_empty() {
+                    None
+                } else {
+                    Some(format!("t:{normalized}"))
+                }
+            }
+
+            MultiModalInput::FeatureTokens { modality, tokens } => {
+                if tokens.is_empty() {
+                    return None;
+                }
+                let mut key = String::from("f:");
+                key.push_str(modality.trim().to_ascii_lowercase().as_str());
+                key.push('|');
+                for token in tokens {
+                    key.push_str(token.trim().to_ascii_lowercase().as_str());
+                    key.push('\u{1f}');
+                }
+                Some(key)
+            }
+            MultiModalInput::ImageBytes(_) => None,
+
+        }
+
+    }
+
+    fn submit_snapshot_bundle_write(
+        &mut self,
+        worker_key: String,
+        bundle_path: PathBuf,
+    ) -> io::Result<u64> {
+
+        let bytes = encode_brain_snapshot_bundle(self)?;
+        let generation = submit_snapshot_write(worker_key.clone(), bundle_path, bytes);
+
+        self.auto_snapshot.worker_key = Some(worker_key);
+        self.auto_snapshot.last_enqueued_generation = generation;
+
+        Ok(generation)
     }
 
     fn maybe_auto_snapshot_after_insert(&mut self) {
@@ -208,20 +393,11 @@ impl MultiModalBrain {
         }
 
         self.auto_snapshot.pending_inserts = self.auto_snapshot.pending_inserts.saturating_add(1);
-        let every_n = self.auto_snapshot.every_n_inserts.max(1);
 
-        if self.auto_snapshot.pending_inserts < every_n {
-            return;
-        }
-
-        match self.persist_auto_snapshot_now() {
-            Ok(()) => {
-                self.auto_snapshot.pending_inserts = 0;
-                self.auto_snapshot.last_error = None;
-            }
-            Err(err) => {
-                self.auto_snapshot.last_error = Some(err.to_string());
-            }
+        // Inserts are WAL-only on the hotpath. Full-state snapshots are reserved for
+        // explicit checkpoint/flush calls (periodic compaction or non-append updates).
+        if let Some(worker_key) = self.transaction_log.worker_key.as_deref() {
+            self.auto_snapshot.last_error = latest_transaction_error(worker_key);
         }
     }
 
@@ -294,6 +470,15 @@ impl MultiModalBrain {
         self.memory_net
             .insert_content(content, metadata, dendrite_type);
 
+        self.append_transaction_operation(TransactionOperation::Upsert {
+            target: TransactionTarget::Memory,
+            content: content.clone(),
+            metadata: metadata.clone(),
+            dendrite_type,
+        });
+
+        self.invalidate_query_cache();
+
         self.maybe_auto_snapshot_after_insert();
     }
 
@@ -342,35 +527,20 @@ impl MultiModalBrain {
     }
 
     pub fn snapshot_instance(&self, instance_id: &str) -> io::Result<()> {
-        let (cognitive_path, memory_path, classifier_path) =
-            snapshot_paths_for_instance(instance_id, None);
-        save_multimodal_network_to_file(&self.cognitive_net, &cognitive_path)?;
-        save_multimodal_network_to_file(&self.memory_net, &memory_path)?;
-        save_classifier_to_file(&self.classifier, &classifier_path)?;
+        let bundle_path = snapshot_bundle_path_for_instance(instance_id, None);
+        save_brain_snapshot_bundle_to_file(self, &bundle_path)?;
         Ok(())
     }
 
     pub fn snapshot_instance_in_dir(&self, instance_id: &str, dir: &Path) -> io::Result<()> {
-        let (cognitive_path, memory_path, classifier_path) =
-            snapshot_paths_for_instance(instance_id, Some(dir));
-        save_multimodal_network_to_file(&self.cognitive_net, &cognitive_path)?;
-        save_multimodal_network_to_file(&self.memory_net, &memory_path)?;
-        save_classifier_to_file(&self.classifier, &classifier_path)?;
+        let bundle_path = snapshot_bundle_path_for_instance(instance_id, Some(dir));
+        save_brain_snapshot_bundle_to_file(self, &bundle_path)?;
         Ok(())
     }
 
     pub fn load_snapshot_instance(&mut self, instance_id: &str) -> io::Result<SnapshotLoadStatus> {
-        let (cognitive_path, memory_path, classifier_path) =
-            snapshot_paths_for_instance(instance_id, None);
-        let cognitive_loaded =
-            load_multimodal_network_from_file(&mut self.cognitive_net, &cognitive_path)?;
-        let memory_loaded = load_multimodal_network_from_file(&mut self.memory_net, &memory_path)?;
-        let classifier_loaded = load_classifier_from_file(&mut self.classifier, &classifier_path)?;
-        Ok(SnapshotLoadStatus {
-            cognitive_loaded,
-            memory_loaded,
-            classifier_loaded,
-        })
+        self.configure_transaction_log_for_instance(instance_id, None);
+        load_snapshot_status_with_transaction_replay(self, instance_id, None)
     }
 
     pub fn load_snapshot_instance_in_dir(
@@ -378,17 +548,16 @@ impl MultiModalBrain {
         instance_id: &str,
         dir: &Path,
     ) -> io::Result<SnapshotLoadStatus> {
-        let (cognitive_path, memory_path, classifier_path) =
-            snapshot_paths_for_instance(instance_id, Some(dir));
-        let cognitive_loaded =
-            load_multimodal_network_from_file(&mut self.cognitive_net, &cognitive_path)?;
-        let memory_loaded = load_multimodal_network_from_file(&mut self.memory_net, &memory_path)?;
-        let classifier_loaded = load_classifier_from_file(&mut self.classifier, &classifier_path)?;
-        Ok(SnapshotLoadStatus {
-            cognitive_loaded,
-            memory_loaded,
-            classifier_loaded,
-        })
+        self.configure_transaction_log_for_instance(instance_id, Some(dir.to_path_buf()));
+        load_snapshot_status_with_transaction_replay(self, instance_id, Some(dir))
+    }
+
+    pub fn snapshot_bundle_path_for_instance_in_dir(
+        &self,
+        instance_id: &str,
+        dir: &Path,
+    ) -> PathBuf {
+        snapshot_bundle_path_for_instance(instance_id, Some(dir))
     }
 
     pub fn snapshot_paths_for_instance_in_dir(
@@ -474,6 +643,15 @@ impl MultiModalBrain {
         self.cognitive_net
             .insert_content(content, metadata, dendrite_type);
 
+        self.append_transaction_operation(TransactionOperation::Upsert {
+            target: TransactionTarget::Cognitive,
+            content: content.clone(),
+            metadata: metadata.clone(),
+            dendrite_type,
+        });
+
+        self.invalidate_query_cache();
+
         self.maybe_auto_snapshot_after_insert();
     }
 
@@ -531,14 +709,42 @@ impl MultiModalBrain {
     }
 
     pub fn evaluate_question_fuzziness(&self, content: &MultiModalInput) -> f64 {
+        if !self.query_cache_enabled {
+            let cognitive_score = self.cognitive_net.fuzzy_success_score_for_content(content);
+
+            if cognitive_score >= 0.0 {
+                return cognitive_score;
+            }
+
+            return self.memory_net.fuzzy_success_score_for_content(content);
+        }
+
+        let cache_key = Self::query_cache_key(content);
+        if let Some(cache_key) = cache_key.as_deref() {
+            let mut cache = self.query_score_cache.borrow_mut();
+            if let Some(score) = cache.get(cache_key) {
+                return score;
+            }
+        }
 
         let cognitive_score = self.cognitive_net.fuzzy_success_score_for_content(content);
 
         if cognitive_score >= 0.0 {
+            if let Some(cache_key) = cache_key {
+                self.query_score_cache
+                    .borrow_mut()
+                    .insert(cache_key, cognitive_score);
+            }
             return cognitive_score;
         }
 
-        self.memory_net.fuzzy_success_score_for_content(content)
+        let memory_score = self.memory_net.fuzzy_success_score_for_content(content);
+        if let Some(cache_key) = cache_key {
+            self.query_score_cache
+                .borrow_mut()
+                .insert(cache_key, memory_score);
+        }
+        memory_score
 
     }
 
@@ -574,8 +780,37 @@ impl MultiModalBrain {
     
 }
 
-fn load_multimodal_network_from_file(
-    network: &mut MultiModalSubNetwork,
+fn save_brain_snapshot_bundle_to_file(brain: &MultiModalBrain, path: &Path) -> io::Result<()> {
+
+    let bytes = encode_brain_snapshot_bundle(brain)?;
+    write_snapshot_bytes_to_path(path, bytes.as_slice())
+
+}
+
+fn encode_brain_snapshot_bundle(brain: &MultiModalBrain) -> io::Result<Vec<u8>> {
+
+    let bundle = BrainSnapshotBundleV1 {
+        cognitive_net: brain.cognitive_net.clone(),
+        memory_net: brain.memory_net.clone(),
+        classifier: brain.classifier.clone(),
+    };
+
+    let encoded = bincode::serialize(&bundle).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("failed to encode brain snapshot bundle: {err}"),
+        )
+    })?;
+
+    let mut bytes = Vec::with_capacity(BRAIN_SNAPSHOT_BIN_MAGIC_V1.len() + encoded.len());
+    bytes.extend_from_slice(&BRAIN_SNAPSHOT_BIN_MAGIC_V1);
+    bytes.extend_from_slice(&encoded);
+    Ok(bytes)
+
+}
+
+fn load_brain_snapshot_bundle_from_file(
+    brain: &mut MultiModalBrain,
     path: &Path,
 ) -> io::Result<bool> {
 
@@ -585,178 +820,110 @@ fn load_multimodal_network_from_file(
         Err(err) => return Err(err),
     };
 
-    if bytes.len() >= 4 && bytes[0..4] == MULTIMODAL_BIN_MAGIC_V2 {
-        let loaded = decode_multimodal_network_payload(&bytes[4..], path)?;
-
-        *network = loaded;
-        network.rebuild_connection_indexes();
-        network.rebuild_token_index();
-
-        return Ok(true);
+    if bytes.len() < BRAIN_SNAPSHOT_BIN_MAGIC_V1.len()
+        || bytes[0..BRAIN_SNAPSHOT_BIN_MAGIC_V1.len()] != BRAIN_SNAPSHOT_BIN_MAGIC_V1
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "failed to decode brain snapshot bundle '{}': missing BSP1 magic header",
+                path.display()
+            ),
+        ));
     }
 
-    if bytes.len() >= 4 && bytes[0..4] == MULTIMODAL_BIN_MAGIC_V1 {
-        let loaded = decode_multimodal_network_payload(&bytes[4..], path)?;
+    let payload = &bytes[BRAIN_SNAPSHOT_BIN_MAGIC_V1.len()..];
+    let decoded = bincode::deserialize::<BrainSnapshotBundleV1>(payload).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "failed to decode brain snapshot bundle '{}': {err}",
+                path.display()
+            ),
+        )
+    })?;
 
-        *network = loaded;
-        network.rebuild_connection_indexes();
-        network.rebuild_token_index();
+    brain.cognitive_net = decoded.cognitive_net;
+    brain.memory_net = decoded.memory_net;
+    brain.classifier = decoded.classifier;
 
-        return Ok(true);
-    }
-
-    let loaded = decode_multimodal_network_json(&bytes, path)?;
-
-    *network = loaded;
-    network.rebuild_connection_indexes();
-    network.rebuild_token_index();
+    brain.cognitive_net.rebuild_connection_indexes();
+    brain.cognitive_net.ensure_token_index();
+    brain.memory_net.rebuild_connection_indexes();
+    brain.memory_net.ensure_token_index();
+    brain.invalidate_query_cache();
 
     Ok(true)
 
 }
 
-fn decode_multimodal_network_payload(
-    payload: &[u8],
-    path: &Path,
-) -> io::Result<MultiModalSubNetwork> {
+fn load_snapshot_status_from_bundle(
+    brain: &mut MultiModalBrain,
+    instance_id: &str,
+    dir_override: Option<&Path>,
+) -> io::Result<SnapshotLoadStatus> {
 
-    match bincode::deserialize::<MultiModalSubNetwork>(payload) {
-        Ok(current) => Ok(current),
-        Err(current_err) => {
-            let legacy = bincode::deserialize::<LegacyMultiModalSubNetworkV1>(payload).map_err(|legacy_err| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "failed to decode multimodal snapshot '{}': current_format_err={current_err}; legacy_format_err={legacy_err}",
-                        path.display()
-                    ),
-                )
-            })?;
-
-            Ok(transcode_legacy_bridge_to_network(legacy.into()))
-        }
+    let bundle_path = snapshot_bundle_path_for_instance(instance_id, dir_override);
+    match load_brain_snapshot_bundle_from_file(brain, &bundle_path) {
+        Ok(true) => Ok(SnapshotLoadStatus {
+            cognitive_loaded: true,
+            memory_loaded: true,
+            classifier_loaded: true,
+        }),
+        Ok(false) => Ok(SnapshotLoadStatus {
+            cognitive_loaded: false,
+            memory_loaded: false,
+            classifier_loaded: false,
+        }),
+        Err(err) => Err(err),
     }
 
 }
 
-fn decode_multimodal_network_json(
-    payload: &[u8],
-    path: &Path,
-) -> io::Result<MultiModalSubNetwork> {
+fn load_snapshot_status_with_transaction_replay(
+    brain: &mut MultiModalBrain,
+    instance_id: &str,
+    dir_override: Option<&Path>,
+) -> io::Result<SnapshotLoadStatus> {
+    let status = load_snapshot_status_from_bundle(brain, instance_id, dir_override)?;
 
-    match serde_json::from_slice::<MultiModalSubNetwork>(payload) {
-        Ok(current) => Ok(current),
-        Err(current_err) => {
-            let legacy = serde_json::from_slice::<LegacyMultiModalSubNetworkV1>(payload).map_err(|legacy_err| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "failed to decode multimodal snapshot '{}': current_json_err={current_err}; legacy_json_err={legacy_err}",
-                        path.display()
-                    ),
-                )
-            })?;
+    let log_path = transaction_log_path_for_instance(instance_id, dir_override);
+    let operations = load_and_sanitize_transaction_log(log_path.as_path())?;
 
-            Ok(transcode_legacy_bridge_to_network(legacy.into()))
-        }
+    brain.transaction_log.replay_in_progress = true;
+    for operation in operations {
+        apply_transaction_operation(brain, operation);
     }
+    brain.transaction_log.replay_in_progress = false;
 
+    Ok(status)
 }
 
-fn transcode_legacy_bridge_to_network(
-    bridge: MultiModalSubNetworkSerdeBridge,
-) -> MultiModalSubNetwork {
-    let mut network = MultiModalSubNetwork::with_controller(bridge.controller);
-    *network.dendrites_mut() = bridge.dendrites;
-    network
-}
-
-fn save_multimodal_network_to_file(network: &MultiModalSubNetwork, path: &Path) -> io::Result<()> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent)?;
+fn apply_transaction_operation(brain: &mut MultiModalBrain, operation: TransactionOperation) {
+    match operation {
+        TransactionOperation::Upsert {
+            target,
+            content,
+            metadata,
+            dendrite_type,
+        } => match target {
+            TransactionTarget::Cognitive => {
+                brain
+                    .cognitive_net
+                    .insert_content(&content, &metadata, dendrite_type);
+            }
+            TransactionTarget::Memory => {
+                brain
+                    .memory_net
+                    .insert_content(&content, &metadata, dendrite_type);
+            }
+        },
     }
-
-    let encoded = bincode::serialize(network).map_err(|err| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "failed to encode multimodal snapshot '{}': {err}",
-                path.display()
-            ),
-        )
-    })?;
-
-    let mut bytes = Vec::with_capacity(MULTIMODAL_BIN_MAGIC_V2.len() + encoded.len());
-    bytes.extend_from_slice(&MULTIMODAL_BIN_MAGIC_V2);
-    bytes.extend_from_slice(&encoded);
-
-    let tmp_path = path.with_extension(format!(
-        "{}.tmp",
-        path.extension()
-            .and_then(|ext| ext.to_str())
-            .unwrap_or("nrn")
-    ));
-
-    fs::write(&tmp_path, bytes)?;
-    fs::rename(&tmp_path, path)?;
-
-    Ok(())
-}
-
-fn load_classifier_from_file(classifier: &mut PatternClassifier, path: &Path) -> io::Result<bool> {
-    let bytes = match fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(err) => return Err(err),
-    };
-
-    let loaded = serde_json::from_slice::<PatternClassifier>(&bytes).map_err(|err| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "failed to decode classifier snapshot '{}': {err}",
-                path.display()
-            ),
-        )
-    })?;
-
-    *classifier = loaded;
-    Ok(true)
-}
-
-fn save_classifier_to_file(classifier: &PatternClassifier, path: &Path) -> io::Result<()> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent)?;
-    }
-
-    let encoded = serde_json::to_vec(classifier).map_err(|err| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "failed to encode classifier snapshot '{}': {err}",
-                path.display()
-            ),
-        )
-    })?;
-
-    let tmp_path = path.with_extension(format!(
-        "{}.tmp",
-        path.extension()
-            .and_then(|ext| ext.to_str())
-            .unwrap_or("json")
-    ));
-
-    fs::write(&tmp_path, encoded)?;
-    fs::rename(&tmp_path, path)?;
-
-    Ok(())
+    brain.invalidate_query_cache();
 }
 
 fn sanitize_instance_id(instance_id: &str) -> String {
+
     instance_id
         .chars()
         .map(|ch| {
@@ -767,9 +934,11 @@ fn sanitize_instance_id(instance_id: &str) -> String {
             }
         })
         .collect()
+
 }
 
 fn fingerprint_instance_id(instance_id: &str) -> String {
+
     // Deterministic FNV-1a 64-bit digest to keep filenames short while avoiding collisions.
     let mut hash: u64 = 0xcbf29ce484222325;
 
@@ -785,6 +954,59 @@ fn snapshot_paths_for_instance(
     instance_id: &str,
     dir_override: Option<&Path>,
 ) -> (PathBuf, PathBuf, PathBuf) {
+
+    let bundle = snapshot_bundle_path_for_instance(instance_id, dir_override);
+    (bundle.clone(), bundle.clone(), bundle)
+
+}
+
+fn snapshot_bundle_path_for_instance(instance_id: &str, dir_override: Option<&Path>) -> PathBuf {
+
+    let (cognitive, _, _) = snapshot_component_paths_for_instance(instance_id, dir_override);
+    let parent = cognitive.parent().map(PathBuf::from).unwrap_or_default();
+    let cognitive_name = cognitive
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("multimodal_snapshot_cognitive.nrn");
+
+    let bundle_name = if cognitive_name.contains("_cognitive.") {
+        cognitive_name.replacen("_cognitive.", "_bundle.", 1)
+    } else {
+        format!("{}_bundle.nrn", cognitive_name)
+    };
+
+    let mut bundle = parent;
+    bundle.push(bundle_name);
+    bundle
+
+}
+
+fn transaction_log_path_for_instance(instance_id: &str, dir_override: Option<&Path>) -> PathBuf {
+
+    let (cognitive, _, _) = snapshot_component_paths_for_instance(instance_id, dir_override);
+    let parent = cognitive.parent().map(PathBuf::from).unwrap_or_default();
+    let cognitive_name = cognitive
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("multimodal_snapshot_cognitive.nrn");
+
+    let log_name = if cognitive_name.contains("_cognitive.") {
+        cognitive_name.replacen("_cognitive.", "_transactions.", 1)
+    } else {
+        format!("{}_transactions.wal", cognitive_name)
+    };
+
+    let mut log_path = parent;
+    log_path.push(log_name);
+    log_path
+
+}
+
+fn snapshot_component_paths_for_instance(
+    instance_id: &str,
+    dir_override: Option<&Path>,
+) -> (PathBuf, PathBuf, PathBuf) {
+
     let trimmed = instance_id.trim();
     let resolved_id = if trimmed.is_empty() {
         "default"
@@ -854,7 +1076,10 @@ fn snapshot_paths_for_instance(
     classifier.push(format!("{}_{}_classifier.json", stem, id_segment));
 
     (cognitive, memory, classifier)
+    
 }
+
+
 
 #[cfg(test)]
 mod tests {
@@ -1122,64 +1347,11 @@ mod tests {
             .snapshot_instance_in_dir(snapshot_id, &test_dir)
             .expect("snapshot should persist");
 
-        let (cognitive_path, _, _) = network.snapshot_paths_for_instance_in_dir(snapshot_id, &test_dir);
-        let bytes = fs::read(cognitive_path).expect("cognitive snapshot should be readable");
+        let bundle_path = network.snapshot_bundle_path_for_instance_in_dir(snapshot_id, &test_dir);
+        let bytes = fs::read(bundle_path).expect("bundle snapshot should be readable");
 
-        assert!(bytes.len() >= MULTIMODAL_BIN_MAGIC_V2.len());
-        assert_eq!(bytes[0..4], MULTIMODAL_BIN_MAGIC_V2);
-
-        cleanup_snapshot_test_dir(test_name);
-    }
-
-    #[test]
-    fn brain_snapshot_loads_legacy_v1_string_payload() {
-        let test_name = "brain_snapshot_legacy_v1";
-        let test_dir = snapshot_test_dir(test_name);
-        cleanup_snapshot_test_dir(test_name);
-
-        let path = test_dir.join("legacy_network.nrn");
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("test snapshot dir should be creatable");
-        }
-
-        let legacy_uid = "legacy_node_a".to_string();
-        let legacy_node = LegacyMultimodalDendriteV1 {
-            uid: legacy_uid.clone(),
-            connections: Vec::new(),
-            data: "txt:legacy".to_string(),
-            modality: "txt".to_string(),
-            metadata: NodeMetadata::with_lang("en"),
-            dendrite_type: DendriteType::Token,
-            normalized_key: String::new(),
-            connection_index: HashMap::new(),
-        };
-
-        let mut legacy_dendrites = HashMap::new();
-        legacy_dendrites.insert(legacy_uid, legacy_node);
-
-        let legacy_network = LegacyMultiModalSubNetworkV1 {
-            dendrites: legacy_dendrites,
-            token_index: HashMap::new(),
-            token_cluster_index: HashMap::new(),
-            controller: MultiModalController,
-        };
-
-        let encoded = bincode::serialize(&legacy_network)
-            .expect("legacy snapshot payload should encode");
-        let mut bytes = Vec::with_capacity(MULTIMODAL_BIN_MAGIC_V1.len() + encoded.len());
-        bytes.extend_from_slice(&MULTIMODAL_BIN_MAGIC_V1);
-        bytes.extend_from_slice(&encoded);
-        fs::write(path.as_path(), bytes).expect("legacy snapshot file should be writable");
-
-        let mut loaded = MultiModalSubNetwork::new_multimodal();
-        let load_status = load_multimodal_network_from_file(&mut loaded, path.as_path())
-            .expect("legacy snapshot should load");
-
-        assert!(load_status);
-        assert!(loaded
-            .all_dendrites_sorted()
-            .iter()
-            .any(|node| node.data == "txt:legacy"));
+        assert!(bytes.len() >= BRAIN_SNAPSHOT_BIN_MAGIC_V1.len());
+        assert_eq!(bytes[0..4], BRAIN_SNAPSHOT_BIN_MAGIC_V1);
 
         cleanup_snapshot_test_dir(test_name);
     }
@@ -1194,21 +1366,20 @@ mod tests {
         network.enable_auto_snapshot_in_dir("autosnap", &test_dir, 2);
 
         let metadata = NodeMetadata::with_lang("en");
-        let (cognitive_path, memory_path, classifier_path) =
-            network.snapshot_paths_for_instance_in_dir("autosnap", &test_dir);
+        let bundle_path = network.snapshot_bundle_path_for_instance_in_dir("autosnap", &test_dir);
 
         network.insert_text("first insert", &metadata, DendriteType::Statement);
 
-        assert!(!cognitive_path.exists());
-        assert!(!memory_path.exists());
-        assert!(!classifier_path.exists());
+        assert!(!bundle_path.exists());
         assert_eq!(network.auto_snapshot_pending_inserts(), 1);
 
         network.insert_text("second insert", &metadata, DendriteType::Statement);
 
-        assert!(cognitive_path.exists());
-        assert!(memory_path.exists());
-        assert!(classifier_path.exists());
+        let flushed = network
+            .flush_auto_snapshot()
+            .expect("flush should persist batched autosnapshot write");
+        assert!(flushed);
+        assert!(bundle_path.exists());
         assert_eq!(network.auto_snapshot_pending_inserts(), 0);
         assert!(network.auto_snapshot_last_error().is_none());
 
@@ -1225,21 +1396,18 @@ mod tests {
         network.enable_auto_snapshot_in_dir("autosnap_flush", &test_dir, 10);
 
         let metadata = NodeMetadata::with_lang("en");
-        let (cognitive_path, memory_path, classifier_path) =
-            network.snapshot_paths_for_instance_in_dir("autosnap_flush", &test_dir);
+        let bundle_path = network.snapshot_bundle_path_for_instance_in_dir("autosnap_flush", &test_dir);
 
         network.insert_text("pending insert", &metadata, DendriteType::Statement);
         assert_eq!(network.auto_snapshot_pending_inserts(), 1);
-        assert!(!cognitive_path.exists());
+        assert!(!bundle_path.exists());
 
         let flushed = network
             .flush_auto_snapshot()
             .expect("flush should persist pending inserts");
 
         assert!(flushed);
-        assert!(cognitive_path.exists());
-        assert!(memory_path.exists());
-        assert!(classifier_path.exists());
+    assert!(bundle_path.exists());
         assert_eq!(network.auto_snapshot_pending_inserts(), 0);
         assert!(network.auto_snapshot_last_error().is_none());
 

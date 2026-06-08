@@ -19,7 +19,8 @@
       "cargo info": true,
       "git ls-remote": true,
       "cargo clean": true,
-      "env": true
+      "env": true,
+      "cargo run": true
     }
   }
 }
