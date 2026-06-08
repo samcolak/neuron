@@ -31,6 +31,7 @@ bincode = "1"
 uuid = { version = "1.22.0", features = ["serde", "v4", "v7", "fast-rng"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 csv = "1"
-libp2p = { version = "0.55", default-features = false, features = ["identify", "noise", "ping", "quic", "request-response", "serde", "tcp", "tokio", "yamux"] }
+libp2p = { version = "0.55", default-features = false, features = ["cbor", "identify", "macros", "mdns", "noise", "ping", "quic", "request-response", "serde", "tcp", "tokio", "yamux"] }
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 apple-mlx = { path = "vendor/apple-mlx", optional = true }
 cudarc = { version = "0.12", optional = true, default-features = false, features = ["driver", "nvrtc", "cuda-12000"] }

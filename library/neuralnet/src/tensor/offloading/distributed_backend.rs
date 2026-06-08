@@ -1,5 +1,6 @@
 use std::env;
 use std::sync::OnceLock;
+use uuid::Uuid;
 
 use crate::distributed::{
     DistributedExecutionPolicy,
@@ -180,16 +181,34 @@ impl TensorBackend for DistributedTensorBackend {
 
 type DistributedExecutor = TransportBackedDistributedExecutor<Libp2pTransport>;
 
+fn first_non_empty_env(names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| {
+        env::var(name)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
+
 fn distributed_executor() -> Option<&'static DistributedExecutor> {
     static EXECUTOR: OnceLock<Option<DistributedExecutor>> = OnceLock::new();
     EXECUTOR.get_or_init(build_distributed_executor).as_ref()
 }
 
 fn distributed_target_peer() -> RemotePeerDescriptor {
-    let peer_id = env::var("NEURALNET_DISTRIBUTED_TARGET_PEER")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| distributed_local_peer().peer_id);
+    let peer_id = first_non_empty_env(&["NEURALNET_DISTRIBUTED_TARGET_PEER"])
+        .or_else(|| {
+            first_non_empty_env(&["NEURALNET_DISTRIBUTED_BOOTSTRAP_PEERS"])
+                .and_then(|value| {
+                    let peers = parse_bootstrap_peers(value.as_str());
+                    if peers.len() == 1 {
+                        peers.first().map(|peer| peer.peer_id.clone())
+                    } else {
+                        None
+                    }
+                })
+        })
+        .unwrap_or_else(|| "auto-discover-target".to_string());
 
     RemotePeerDescriptor {
         peer_id,
@@ -206,7 +225,7 @@ fn distributed_local_peer() -> RemotePeerDescriptor {
         peer_id: env::var("NEURALNET_DISTRIBUTED_LOCAL_PEER")
             .ok()
             .filter(|v| !v.trim().is_empty())
-            .unwrap_or_else(|| "neuralnet-local".to_string()),
+            .unwrap_or_else(default_local_peer_id),
         platform: env::var("NEURALNET_DISTRIBUTED_LOCAL_PLATFORM")
             .ok()
             .unwrap_or_else(|| std::env::consts::OS.to_string()),
@@ -215,24 +234,39 @@ fn distributed_local_peer() -> RemotePeerDescriptor {
     }
 }
 
+fn default_local_peer_id() -> String {
+    static GENERATED_ID: OnceLock<String> = OnceLock::new();
+    GENERATED_ID
+        .get_or_init(|| {
+            let compact = Uuid::now_v7().to_string().replace('-', "");
+            format!("neuralnet-client-{compact}")
+        })
+        .clone()
+}
+
 fn build_distributed_executor() -> Option<DistributedExecutor> {
     let local_peer = distributed_local_peer();
     let mut config = Libp2pTransportConfig::default();
 
-    if let Ok(name) = env::var("NEURALNET_DISTRIBUTED_SWARM_NAME")
-        && !name.trim().is_empty()
-    {
+    if let Some(name) = first_non_empty_env(&[
+        "NEURALNET_DISTRIBUTED_SWARM_NAME",
+        "NEURALNET_SWARM_NAME",
+    ]) {
         config.swarm_name = name;
     }
-    if let Ok(version) = env::var("NEURALNET_DISTRIBUTED_SWARM_VERSION")
-        && !version.trim().is_empty()
-    {
+    if let Some(version) = first_non_empty_env(&[
+        "NEURALNET_DISTRIBUTED_SWARM_VERSION",
+        "NEURALNET_SWARM_VERSION",
+    ]) {
         config.swarm_version = version;
     }
     if let Ok(timeout) = env::var("NEURALNET_DISTRIBUTED_TIMEOUT_MS")
         && let Ok(parsed) = timeout.parse::<u64>()
     {
         config.request_timeout_ms = parsed.max(1);
+    }
+    if let Ok(bootstrap) = env::var("NEURALNET_DISTRIBUTED_BOOTSTRAP_PEERS") {
+        config.bootstrap_peers = parse_bootstrap_peers(bootstrap.as_str());
     }
 
     let transport = Libp2pTransport::new(local_peer, config).ok()?;
@@ -257,6 +291,30 @@ fn build_distributed_executor() -> Option<DistributedExecutor> {
         capabilities,
         transport,
     ))
+}
+
+fn parse_bootstrap_peers(value: &str) -> Vec<crate::distributed::Libp2pBootstrapPeer> {
+    value
+        .split(',')
+        .filter_map(|entry| {
+            let trimmed = entry.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+
+            let (peer_id, address) = trimmed.split_once('@')?;
+            let peer_id = peer_id.trim();
+            let address = address.trim();
+            if peer_id.is_empty() || address.is_empty() {
+                return None;
+            }
+
+            Some(crate::distributed::Libp2pBootstrapPeer {
+                peer_id: peer_id.to_string(),
+                address: address.to_string(),
+            })
+        })
+        .collect()
 }
 
 fn execute_distributed_job(job: DistributedTensorJob) -> Result<DistributedTensorJobResult, TensorError> {

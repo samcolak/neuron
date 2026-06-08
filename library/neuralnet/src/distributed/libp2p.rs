@@ -5,7 +5,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use libp2p::{Multiaddr, PeerId};
+use libp2p::futures::StreamExt;
+use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
+use libp2p::{identify, mdns, request_response, Multiaddr, PeerId, StreamProtocol, SwarmBuilder};
+use tokio::runtime;
+use tokio::sync::mpsc as tokio_mpsc;
 
 use super::error::DistributedTensorError;
 use super::policy::{DistributedExecutorCapabilities, RemotePeerDescriptor};
@@ -32,6 +36,53 @@ use crate::tensor::backend::{
 
 const DEFAULT_SWARM_NAME: &str = "neuralnet-distributed";
 const DEFAULT_SWARM_VERSION: &str = "v1";
+
+fn distributed_debug_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        env::var("NEURALNET_DISTRIBUTED_DEBUG")
+            .ok()
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn debug_log(message: impl AsRef<str>) {
+    if distributed_debug_enabled() {
+        eprintln!("[distributed][debug] {}", message.as_ref());
+    }
+}
+
+#[derive(Debug)]
+enum NetworkCommand {
+    Send(Box<NetworkSendCommand>),
+    Discover {
+        response_tx: Sender<Result<Vec<TransportPeerRecord>, DistributedTensorError>>,
+    },
+    Stop,
+}
+
+#[derive(Debug)]
+struct NetworkSendCommand {
+    peer: RemotePeerDescriptor,
+    message: DistributedTransportMessage,
+    response_tx: Sender<Result<DistributedTransportMessage, DistributedTensorError>>,
+}
+
+#[derive(NetworkBehaviour)]
+struct DistributedNetworkBehaviour {
+    request_response: request_response::cbor::Behaviour<
+        DistributedTransportMessage,
+        DistributedTransportMessage,
+    >,
+    identify: identify::Behaviour,
+    mdns: mdns::tokio::Behaviour,
+}
 
 enum ReactorCommand {
     Message(Box<ReactorMessageCommand>),
@@ -156,6 +207,8 @@ pub struct Libp2pTransport {
     known_peers: Arc<Mutex<Vec<TransportPeerRecord>>>,
     reactor_tx: Sender<ReactorCommand>,
     reactor_join: Mutex<Option<JoinHandle<()>>>,
+    network_tx: tokio_mpsc::UnboundedSender<NetworkCommand>,
+    network_join: Mutex<Option<JoinHandle<()>>>,
 }
 
 fn selected_server_backend_kind() -> TensorBackendKind {
@@ -308,12 +361,23 @@ impl Libp2pTransport {
         config: Libp2pTransportConfig,
     ) -> Result<Self, DistributedTensorError> {
         config.validate()?;
+        debug_log(format!(
+            "initializing transport peer={} swarm={} bootstrap_peers={}",
+            local_peer.peer_id,
+            config.swarm_identifier(),
+            config.bootstrap_peers.len()
+        ));
         let known_peers = Arc::new(Mutex::new(Vec::new()));
         let (reactor_tx, reactor_join) = Self::spawn_swarm_reactor(
             local_peer.clone(),
             config.clone(),
             Arc::clone(&known_peers),
         );
+        let (network_tx, network_join) = Self::spawn_network_swarm(
+            local_peer.clone(),
+            config.clone(),
+            Arc::clone(&known_peers),
+        )?;
 
         let swarm_id = config.swarm_identifier();
         Self::register_local_reactor(&swarm_id, &local_peer.peer_id, reactor_tx.clone())?;
@@ -324,6 +388,8 @@ impl Libp2pTransport {
             known_peers,
             reactor_tx,
             reactor_join: Mutex::new(Some(reactor_join)),
+            network_tx,
+            network_join: Mutex::new(Some(network_join)),
         })
     }
 
@@ -405,6 +471,406 @@ impl Libp2pTransport {
                 peer_id: peer.peer_id.clone(),
                 timeout_ms: self.config.request_timeout_ms,
             })?
+    }
+
+    fn dispatch_message_to_network(
+        &self,
+        peer: &RemotePeerDescriptor,
+        message: DistributedTransportMessage,
+    ) -> Result<DistributedTransportMessage, DistributedTensorError> {
+        debug_log(format!(
+            "network send requested target_peer={} message_id={}",
+            peer.peer_id, message.message_id
+        ));
+        let (response_tx, response_rx) = mpsc::channel();
+        self.network_tx
+            .send(NetworkCommand::Send(Box::new(NetworkSendCommand {
+                peer: peer.clone(),
+                message,
+                response_tx,
+            })))
+            .map_err(|err| {
+                DistributedTensorError::Transport(format!(
+                    "failed to submit network send command for peer {}: {err}",
+                    peer.peer_id
+                ))
+            })?;
+
+        response_rx
+            .recv_timeout(Duration::from_millis(self.config.request_timeout_ms))
+            .map_err(|_| DistributedTensorError::Timeout {
+                peer_id: peer.peer_id.clone(),
+                timeout_ms: self.config.request_timeout_ms,
+            })?
+    }
+
+    fn discover_network_peers(&self) -> Result<Vec<TransportPeerRecord>, DistributedTensorError> {
+        let (response_tx, response_rx) = mpsc::channel();
+        self.network_tx
+            .send(NetworkCommand::Discover { response_tx })
+            .map_err(|err| {
+                DistributedTensorError::Transport(format!(
+                    "failed to submit network discovery command: {err}"
+                ))
+            })?;
+
+        response_rx
+            .recv_timeout(Duration::from_millis(self.config.request_timeout_ms))
+            .map_err(|_| DistributedTensorError::Timeout {
+                peer_id: "network-discovery".to_string(),
+                timeout_ms: self.config.request_timeout_ms,
+            })?
+    }
+
+    fn spawn_network_swarm(
+        local_peer: RemotePeerDescriptor,
+        config: Libp2pTransportConfig,
+        known_peers: Arc<Mutex<Vec<TransportPeerRecord>>>,
+    ) -> Result<(tokio_mpsc::UnboundedSender<NetworkCommand>, JoinHandle<()>), DistributedTensorError>
+    {
+        let (command_tx, mut command_rx) = tokio_mpsc::unbounded_channel::<NetworkCommand>();
+        let thread_name = format!("{}-net", config.swarm_identifier());
+
+        let join = thread::Builder::new()
+            .name(thread_name)
+            .spawn(move || {
+                let runtime = match runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(_) => return,
+                };
+
+                runtime.block_on(async move {
+                    let keypair = libp2p::identity::Keypair::generate_ed25519();
+                    let rr_config = request_response::Config::default()
+                        .with_request_timeout(Duration::from_millis(config.request_timeout_ms));
+
+                    let mut swarm = match SwarmBuilder::with_existing_identity(keypair)
+                        .with_tokio()
+                        .with_quic()
+                        .with_behaviour(|key| {
+                            let protocols = std::iter::once((
+                                StreamProtocol::new(DISTRIBUTED_TRANSPORT_PROTOCOL_NAME),
+                                request_response::ProtocolSupport::Full,
+                            ));
+                            let request_response = request_response::cbor::Behaviour::new(
+                                protocols,
+                                rr_config.clone(),
+                            );
+
+                            let identify = identify::Behaviour::new(identify::Config::new(
+                                config.scoped_protocol_name(),
+                                key.public(),
+                            ));
+                            let mdns = mdns::tokio::Behaviour::new(
+                                mdns::Config::default(),
+                                PeerId::from(key.public()),
+                            )
+                            .expect("failed to initialize mdns behaviour");
+
+                            DistributedNetworkBehaviour {
+                                request_response,
+                                identify,
+                                mdns,
+                            }
+                        })
+                    {
+                        Ok(builder) => builder.build(),
+                        Err(_) => return,
+                    };
+
+                    for address in &config.listen_addresses {
+                        if let Ok(addr) = address.parse::<Multiaddr>() {
+                            debug_log(format!("listening on {}", addr));
+                            let _ = swarm.listen_on(addr);
+                        }
+                    }
+
+                    let mut peer_addrs: HashMap<PeerId, Vec<Multiaddr>> = HashMap::new();
+                    for bootstrap in &config.bootstrap_peers {
+                        if let (Ok(peer_id), Ok(address)) = (
+                            bootstrap.peer_id.parse::<PeerId>(),
+                            bootstrap.address.parse::<Multiaddr>(),
+                        ) {
+                            debug_log(format!(
+                                "bootstrap dial peer_id={} addr={}",
+                                peer_id, address
+                            ));
+                            peer_addrs.entry(peer_id).or_default().push(address.clone());
+                            let _ = swarm.dial(address);
+                        }
+                    }
+
+                    let mut pending_responses: HashMap<
+                        request_response::OutboundRequestId,
+                        Sender<Result<DistributedTransportMessage, DistributedTensorError>>,
+                    > = HashMap::new();
+
+                    loop {
+                        tokio::select! {
+                            maybe_command = command_rx.recv() => {
+                                let Some(command) = maybe_command else {
+                                    break;
+                                };
+
+                                match command {
+                                    NetworkCommand::Send(send) => {
+                                        let NetworkSendCommand {
+                                            peer,
+                                            message,
+                                            response_tx,
+                                        } = *send;
+                                        let peer_id = match peer.peer_id.parse::<PeerId>() {
+                                            Ok(peer_id) => peer_id,
+                                            Err(err) => {
+                                                let fallback = if peer_addrs.len() == 1 {
+                                                    peer_addrs.keys().next().cloned()
+                                                } else {
+                                                    None
+                                                }
+                                                .or_else(|| known_peers
+                                                    .lock()
+                                                    .ok()
+                                                    .and_then(|records| {
+                                                        let candidates = records
+                                                            .iter()
+                                                            .filter_map(|record| {
+                                                                if record.descriptor.peer_id == local_peer.peer_id {
+                                                                    return None;
+                                                                }
+                                                                record.descriptor.peer_id.parse::<PeerId>().ok()
+                                                            })
+                                                            .collect::<Vec<_>>();
+                                                        if candidates.len() == 1 {
+                                                            candidates.first().cloned()
+                                                        } else {
+                                                            None
+                                                        }
+                                                    }));
+
+                                                if let Some(peer_id) = fallback {
+                                                    debug_log(format!(
+                                                        "target peer alias '{}' resolved to discovered peer {}",
+                                                        peer.peer_id, peer_id
+                                                    ));
+                                                    peer_id
+                                                } else {
+                                                    debug_log(format!(
+                                                        "failed resolving target peer alias '{}': {}",
+                                                        peer.peer_id, err
+                                                    ));
+                                                    let _ = response_tx.send(Err(DistributedTensorError::Transport(format!(
+                                                        "target peer_id is not a valid libp2p PeerId ({}): {err}. Set NEURALNET_DISTRIBUTED_TARGET_PEER to a valid PeerId or configure a single bootstrap/discovered peer.",
+                                                        peer.peer_id
+                                                    ))));
+                                                    continue;
+                                                }
+                                            }
+                                        };
+
+                                        if let Some(addresses) = peer_addrs.get(&peer_id) {
+                                            for address in addresses {
+                                                let _ = swarm.dial(address.clone());
+                                            }
+                                        }
+
+                                        let request_id = swarm
+                                            .behaviour_mut()
+                                            .request_response
+                                            .send_request(&peer_id, message);
+                                        debug_log(format!(
+                                            "outbound request queued peer_id={} request_id={:?}",
+                                            peer_id, request_id
+                                        ));
+                                        pending_responses.insert(request_id, response_tx);
+                                    }
+                                    NetworkCommand::Discover { response_tx } => {
+                                        let peers = known_peers
+                                            .lock()
+                                            .map(|records| records.clone())
+                                            .unwrap_or_default();
+                                        let _ = response_tx.send(Ok(peers));
+                                    }
+                                    NetworkCommand::Stop => {
+                                        break;
+                                    }
+                                }
+                            }
+                            event = swarm.select_next_some() => {
+                                match event {
+                                    SwarmEvent::Behaviour(DistributedNetworkBehaviourEvent::Identify(identify::Event::Received {
+                                        peer_id,
+                                        info,
+                                        ..
+                                    })) => {
+                                        debug_log(format!(
+                                            "identify received peer_id={} addresses={}",
+                                            peer_id,
+                                            info.listen_addrs.len()
+                                        ));
+                                        peer_addrs.insert(peer_id, info.listen_addrs.clone());
+                                        let record = TransportPeerRecord {
+                                            descriptor: RemotePeerDescriptor {
+                                                peer_id: peer_id.to_string(),
+                                                platform: "remote".to_string(),
+                                                accelerator: None,
+                                                transport: "libp2p".to_string(),
+                                            },
+                                            addresses: info.listen_addrs.iter().map(ToString::to_string).collect(),
+                                            average_rtt_ms: None,
+                                            last_seen_unix_ms: None,
+                                            is_reachable: true,
+                                        };
+                                        if let Ok(mut peers) = known_peers.lock() {
+                                            if let Some(existing) = peers
+                                                .iter_mut()
+                                                .find(|existing| existing.descriptor.peer_id == record.descriptor.peer_id)
+                                            {
+                                                *existing = record;
+                                            } else {
+                                                peers.push(record);
+                                            }
+                                        }
+                                    }
+                                    SwarmEvent::Behaviour(DistributedNetworkBehaviourEvent::Mdns(event)) => {
+                                        match event {
+                                            mdns::Event::Discovered(entries) => {
+                                                for (peer_id, address) in entries {
+                                                    debug_log(format!(
+                                                        "mdns discovered peer_id={} addr={}",
+                                                        peer_id, address
+                                                    ));
+
+                                                    peer_addrs
+                                                        .entry(peer_id)
+                                                        .or_default()
+                                                        .push(address.clone());
+                                                    let _ = swarm.dial(address.clone());
+
+                                                    let record = TransportPeerRecord {
+                                                        descriptor: RemotePeerDescriptor {
+                                                            peer_id: peer_id.to_string(),
+                                                            platform: "mdns".to_string(),
+                                                            accelerator: None,
+                                                            transport: "libp2p".to_string(),
+                                                        },
+                                                        addresses: vec![address.to_string()],
+                                                        average_rtt_ms: None,
+                                                        last_seen_unix_ms: None,
+                                                        is_reachable: true,
+                                                    };
+                                                    if let Ok(mut peers) = known_peers.lock() {
+                                                        if let Some(existing) = peers
+                                                            .iter_mut()
+                                                            .find(|existing| existing.descriptor.peer_id == record.descriptor.peer_id)
+                                                        {
+                                                            if !existing.addresses.contains(&address.to_string()) {
+                                                                existing.addresses.push(address.to_string());
+                                                            }
+                                                            existing.is_reachable = true;
+                                                        } else {
+                                                            peers.push(record);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            mdns::Event::Expired(entries) => {
+                                                for (peer_id, address) in entries {
+                                                    debug_log(format!(
+                                                        "mdns expired peer_id={} addr={}",
+                                                        peer_id, address
+                                                    ));
+                                                    if let Some(addresses) = peer_addrs.get_mut(&peer_id) {
+                                                        addresses.retain(|known| known != &address);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    SwarmEvent::Behaviour(DistributedNetworkBehaviourEvent::RequestResponse(event)) => {
+                                        match event {
+                                            request_response::Event::Message { peer, message, .. } => {
+                                                match message {
+                                                    request_response::Message::Request { request, channel, .. } => {
+                                                        debug_log(format!(
+                                                            "inbound request from peer_id={} message_id={}",
+                                                            peer,
+                                                            request.message_id
+                                                        ));
+                                                        let source = RemotePeerDescriptor {
+                                                            peer_id: peer.to_string(),
+                                                            platform: "remote".to_string(),
+                                                            accelerator: None,
+                                                            transport: "libp2p".to_string(),
+                                                        };
+
+                                                        let response = Libp2pTransport::process_swarm_message(
+                                                            &local_peer,
+                                                            &config,
+                                                            &known_peers,
+                                                            &source,
+                                                            request,
+                                                        )
+                                                        .unwrap_or_else(|err| {
+                                                            DistributedTransportMessage::new(
+                                                                local_peer.peer_id.clone(),
+                                                                Some(source.peer_id.clone()),
+                                                                DistributedTransportPayload::Error {
+                                                                    message: format!("network swarm failed to process request: {err}"),
+                                                                },
+                                                            )
+                                                        });
+
+                                                        let _ = swarm
+                                                            .behaviour_mut()
+                                                            .request_response
+                                                            .send_response(channel, response);
+                                                    }
+                                                    request_response::Message::Response { request_id, response } => {
+                                                        debug_log(format!(
+                                                            "inbound response request_id={:?} message_id={}",
+                                                            request_id,
+                                                            response.message_id
+                                                        ));
+                                                        if let Some(tx) = pending_responses.remove(&request_id) {
+                                                            let _ = tx.send(Ok(response));
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            request_response::Event::OutboundFailure { request_id, error, .. } => {
+                                                debug_log(format!(
+                                                    "outbound request failure request_id={:?} error={}",
+                                                    request_id, error
+                                                ));
+                                                if let Some(tx) = pending_responses.remove(&request_id) {
+                                                    let _ = tx.send(Err(DistributedTensorError::Transport(format!(
+                                                        "network outbound request failed: {error}"
+                                                    ))));
+                                                }
+                                            }
+                                            request_response::Event::InboundFailure { error, .. } => {
+                                                debug_log(format!("inbound request failure error={error}"));
+                                            }
+                                            request_response::Event::ResponseSent { .. } => {}
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                });
+            })
+            .map_err(|err| {
+                DistributedTensorError::Transport(format!(
+                    "failed to spawn libp2p network swarm thread: {err}"
+                ))
+            })?;
+
+        Ok((command_tx, join))
     }
 
     fn spawn_swarm_reactor(
@@ -744,6 +1210,9 @@ impl DistributedTransport for Libp2pTransport {
         }
         
         peers.extend(self.snapshot_known_peers());
+        if let Ok(network_peers) = self.discover_network_peers() {
+            peers.extend(network_peers);
+        }
         Ok(peers)
 
     }
@@ -761,11 +1230,7 @@ impl DistributedTransport for Libp2pTransport {
             return self.dispatch_message_to_reactor(remote_reactor, peer, message);
         }
 
-        Err(DistributedTensorError::Transport(format!(
-            "libp2p swarm loop {} has no remote reactor attached for peer {}",
-            self.swarm_identifier(),
-            peer.peer_id
-        )))
+        self.dispatch_message_to_network(peer, message)
     }
 
 }
@@ -775,7 +1240,13 @@ impl Drop for Libp2pTransport {
     fn drop(&mut self) {
         Self::unregister_local_reactor(&self.swarm_identifier(), &self.local_peer.peer_id);
         let _ = self.reactor_tx.send(ReactorCommand::Stop);
+        let _ = self.network_tx.send(NetworkCommand::Stop);
         if let Ok(mut join) = self.reactor_join.lock()
+            && let Some(handle) = join.take()
+        {
+            let _ = handle.join();
+        }
+        if let Ok(mut join) = self.network_join.lock()
             && let Some(handle) = join.take()
         {
             let _ = handle.join();
