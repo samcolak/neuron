@@ -362,10 +362,10 @@ fn execute_distributed_job(job: DistributedTensorJob) -> Result<DistributedTenso
             "distributed backend target resolution failed: {err}"
         ).into_boxed_str())))?;
 
-    eprintln!(
-        "[distributed][client] target peer={}",
-        target_peer.peer_id
-    );
+    // eprintln!(
+    //     "[distributed][client] target peer={}",
+    //     target_peer.peer_id
+    // );
 
     executor
         .execute(&target_peer, job)

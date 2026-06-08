@@ -788,14 +788,14 @@ impl Libp2pTransport {
                                             request_response::Event::Message { peer, message, .. } => {
                                                 match message {
                                                     request_response::Message::Request { request, channel, .. } => {
-                                                        eprintln!(
-                                                            "[distributed][server] inbound request peer={}",
-                                                            peer
-                                                        );
-                                                        debug_log(format!(
-                                                            "inbound request peer={}",
-                                                            peer
-                                                        ));
+                                                        // eprintln!(
+                                                        //     "[distributed][server] inbound request peer={}",
+                                                        //     peer
+                                                        // );
+                                                        // debug_log(format!(
+                                                        //     "inbound request peer={}",
+                                                        //     peer
+                                                        // ));
                                                         let source = RemotePeerDescriptor {
                                                             peer_id: peer.to_string(),
                                                             platform: "remote".to_string(),
