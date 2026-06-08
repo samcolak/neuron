@@ -24,6 +24,13 @@ fn parse_u64_env(var_name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
+    fn parse_usize_env(var_name: &str, default: usize) -> usize {
+        env::var(var_name)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(default)
+    }
+
 fn parse_bool_env(var_name: &str, default: bool) -> bool {
     env::var(var_name)
         .ok()
@@ -118,6 +125,9 @@ fn run_impl() -> Result<(), String> {
     );
     println!("  discovered peers: {:?}", runtime.discovered_peers());
 
+    let heartbeat_secs = parse_u64_env("NEURON_DISTRIBUTED_SERVER_HEARTBEAT_SECS", 5);
+    let heartbeat_peers_limit = parse_usize_env("NEURON_DISTRIBUTED_SERVER_HEARTBEAT_PEER_LIMIT", 8);
+
     let run_self_test = parse_bool_env("NEURON_DISTRIBUTED_SERVER_SELF_TEST", false);
     if run_self_test {
         let client_peer = RemotePeerDescriptor {
@@ -158,6 +168,26 @@ fn run_impl() -> Result<(), String> {
         println!("  server is running (press Ctrl+C to stop)");
         loop {
             runtime.await_events_for(Duration::from_secs(1));
+            if heartbeat_secs > 0 && runtime.uptime().as_secs().is_multiple_of(heartbeat_secs) {
+                match runtime.discovered_peers() {
+                    Ok(peers) => {
+                        let peer_summaries = peers
+                            .iter()
+                            .take(heartbeat_peers_limit)
+                            .map(|peer| peer.descriptor.peer_id.clone())
+                            .collect::<Vec<_>>();
+                        println!(
+                            "  heartbeat uptime={:?} discovered_peers={} sample={:?}",
+                            runtime.uptime(),
+                            peers.len(),
+                            peer_summaries
+                        );
+                    }
+                    Err(error) => {
+                        eprintln!("  heartbeat discovery error: {error}");
+                    }
+                }
+            }
         }
     }
 
