@@ -1,6 +1,14 @@
 {
   "folders": [
     {
+      "name": ".github",
+      "path": "../.github"
+    },
+    {
+      "name": "scripts",
+      "path": "../scripts"
+    },
+    {
       "name": "neuralnet",
       "path": "../library"
     },

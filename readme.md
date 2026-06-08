@@ -20,3 +20,28 @@ Written by Samuel Colak (sam@samcolak.com)
 The is distributed under the GPL-3 license
 
 Any derived works released must be open-sourced - This is to benefit the community and foster development in the ML / NeuralNet space
+
+## Coverage
+
+Coverage checks are wired via `cargo-llvm-cov` for both active crates:
+
+- `library/neuralnet`
+- `pt5/neuron`
+
+Run locally:
+
+```bash
+cargo install cargo-llvm-cov
+bash scripts/coverage.sh
+```
+
+Optional local gate (line coverage %):
+
+```bash
+COVERAGE_MIN_LINES=35 bash scripts/coverage.sh
+```
+
+CI workflow:
+
+- `.github/workflows/coverage.yml`
+- uploads LCOV artifacts for both crates as `coverage/*.lcov`
