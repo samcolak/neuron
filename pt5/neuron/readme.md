@@ -1,23 +1,57 @@
 
 # Neuron App
 
-Neuron is the runnable companion app for the `neuralnet` library. It exists to show the library in action, compare backend behavior, and provide realistic walkthroughs for training, inference, and multimodal flows.
+Neuron is the runnable companion app for the `neuralnet` library. It exists to showcase the library in practice, compare backend behavior, and provide realistic walkthroughs for training, inference, and multimodal workflows.
 
-## What this app gives you
+## What You Get
 
-- A polished entry point for exercising the library from the command line.
-- Real walkthroughs for CNN training, batch inference, backend comparison, and multimodal demonstrations.
-- A practical way to see how CPU, CUDA, and MLX execution modes behave on the current machine.
-- A reproducible harness for validating performance, quality, and backend policy changes.
+- A command-line entry point for exercising the library end to end.
+- Walkthroughs for multimodal demos, trainer behavior, CNN training, batch inference, and RAG flows.
+- A practical way to compare CPU, CUDA, and MLX execution on the current machine.
+- A repeatable harness for validating performance, quality, and backend policy changes.
 
-## Why it matters
+## Included Walkthroughs
+
+When you run the app, it executes the following demos in sequence:
+
+- Multimodal brain demo
+- Trainer walkthrough
+- CNN classifier walkthrough
+- RAG walkthrough
+- RAG dataset walkthrough
+- Multimodal tensor walkthrough
+- Brain stress walkthrough
+
+These are intentionally written to demonstrate the current library behavior, not to provide a general-purpose UI.
+
+## Why It Matters
 
 - CPU remains the stable baseline for all runs.
 - Accelerators can be enabled when available without changing the app structure.
-- The app reflects the current runtime backend selection and fallback policy used by the library.
+- The app reflects the runtime backend selection and fallback policy used by the library.
 - It is useful both as a test surface and as a reference implementation for integrating the library into a larger service.
 
-## Backend support
+## Quick Start
+
+Run the default CPU-backed app:
+
+```bash
+cargo run
+```
+
+Run with MLX when your Apple Silicon environment is ready:
+
+```bash
+cargo run --features offloading-mlx
+```
+
+Run with CUDA when the feature and hardware are available:
+
+```bash
+cargo run --features offloading-cuda
+```
+
+## Backend Support
 
 ### CPU
 
@@ -25,7 +59,7 @@ CPU is always available and is the default execution path.
 
 ### CUDA
 
-CUDA support is available through feature gating, but it remains less battle-tested than the CPU path.
+CUDA support is feature-gated and remains less battle-tested than the CPU path.
 
 ### MLX for Apple Silicon
 
@@ -38,7 +72,7 @@ The external prefix must contain:
 - `lib/mlx.metallib`
 - `share/cmake/MLX/MLXConfig.cmake`
 
-You can configure it with:
+Configure it with:
 
 ```bash
 export APPLE_MLX_PREFIX="/absolute/path/to/mlx-prefix"
@@ -61,26 +95,6 @@ If the Metal tooling is not ready, confirm Xcode Command Line Tools are set corr
 ```bash
 sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 xcrun -sdk macosx metal -v
-```
-
-## Running the app
-
-Use the app as a comparison and validation harness while developing the library.
-
-```bash
-cargo run
-```
-
-To enable MLX when the environment is ready:
-
-```bash
-cargo run --features offloading-mlx
-```
-
-To enable CUDA:
-
-```bash
-cargo run --features offloading-cuda
 ```
 
 ## Notes
