@@ -1,4 +1,6 @@
 use std::env;
+use std::thread;
+use std::time::Duration;
 use std::sync::OnceLock;
 use uuid::Uuid;
 
@@ -8,6 +10,7 @@ use crate::distributed::{
     DistributedTensorExecutor,
     DistributedTensorJob,
     DistributedTensorJobResult,
+    DistributedTransport,
     DistributedWorkUnitKind,
     Libp2pTransport,
     Libp2pTransportConfig,
@@ -271,6 +274,10 @@ fn build_distributed_executor() -> Option<DistributedExecutor> {
 
     let transport = Libp2pTransport::new(local_peer, config).ok()?;
 
+    // Give mDNS/identify a short window to discover remote peers before the
+    // first distributed tensor op, which avoids immediate CPU failover.
+    warm_up_peer_discovery(&transport);
+
     let mut policy = DistributedExecutionPolicy::coordinator_default();
     policy.timeout_ms = transport.config().request_timeout_ms;
 
@@ -291,6 +298,34 @@ fn build_distributed_executor() -> Option<DistributedExecutor> {
         capabilities,
         transport,
     ))
+}
+
+fn warm_up_peer_discovery(transport: &Libp2pTransport) {
+    let wait_ms = env::var("NEURALNET_DISTRIBUTED_DISCOVERY_WAIT_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(1_500);
+
+    if wait_ms == 0 {
+        return;
+    }
+
+    let local_peer_id = transport.local_peer().peer_id.clone();
+    let step_ms = 100u64;
+    let mut waited = 0u64;
+    while waited < wait_ms {
+        if let Ok(peers) = transport.discover_peers() {
+            let found_remote = peers
+                .iter()
+                .any(|peer| peer.descriptor.peer_id != local_peer_id);
+            if found_remote {
+                return;
+            }
+        }
+
+        thread::sleep(Duration::from_millis(step_ms));
+        waited = waited.saturating_add(step_ms);
+    }
 }
 
 fn parse_bootstrap_peers(value: &str) -> Vec<crate::distributed::Libp2pBootstrapPeer> {
@@ -322,9 +357,67 @@ fn execute_distributed_job(job: DistributedTensorJob) -> Result<DistributedTenso
         "distributed backend is not initialized",
     ))?;
 
+    let target_peer = resolve_distributed_target_peer(executor.transport())
+        .map_err(|err| TensorError::InvalidArgument(Box::leak(format!(
+            "distributed backend target resolution failed: {err}"
+        ).into_boxed_str())))?;
+
+    eprintln!(
+        "[distributed][client] resolved target peer={} platform={} transport={}",
+        target_peer.peer_id,
+        target_peer.platform,
+        target_peer.transport
+    );
+
     executor
-        .execute(&distributed_target_peer(), job)
+        .execute(&target_peer, job)
         .map_err(|err| TensorError::InvalidArgument(Box::leak(format!("distributed backend error: {err}").into_boxed_str())))
+}
+
+fn resolve_distributed_target_peer(
+    transport: &Libp2pTransport,
+) -> Result<RemotePeerDescriptor, String> {
+    let explicit_target = first_non_empty_env(&["NEURALNET_DISTRIBUTED_TARGET_PEER"]);
+    let local_peer_id = transport.local_peer().peer_id.clone();
+
+    if let Some(peer_id) = explicit_target {
+        if peer_id != "auto-discover-target" {
+            return Ok(RemotePeerDescriptor {
+                peer_id,
+                platform: env::var("NEURALNET_DISTRIBUTED_TARGET_PLATFORM")
+                    .ok()
+                    .unwrap_or_else(|| "unknown".to_string()),
+                accelerator: env::var("NEURALNET_DISTRIBUTED_TARGET_ACCELERATOR").ok(),
+                transport: "libp2p".to_string(),
+            });
+        }
+    }
+
+    let discovered = transport
+        .discover_peers()
+        .map_err(|err| format!("peer discovery failed: {err}"))?;
+
+    let candidates = discovered
+        .into_iter()
+        .filter(|peer| peer.descriptor.peer_id != local_peer_id)
+        .collect::<Vec<_>>();
+
+    if candidates.len() == 1 {
+        let peer = &candidates[0].descriptor;
+        return Ok(peer.clone());
+    }
+
+    if candidates.is_empty() {
+        eprintln!(
+            "[distributed][client] no remote peers discovered yet; waiting for mDNS/bootstrap discovery"
+        );
+        return Err("no remote peers discovered; set NEURALNET_DISTRIBUTED_BOOTSTRAP_PEERS or wait for mDNS discovery".to_string());
+    }
+
+    Err(format!(
+        "multiple remote peers discovered ({count}); set NEURALNET_DISTRIBUTED_TARGET_PEER explicitly",
+        count = candidates.len()
+    ))
 }
 
 fn execute_tensor_job(job: DistributedTensorJob) -> Result<Tensor4D, TensorError> {

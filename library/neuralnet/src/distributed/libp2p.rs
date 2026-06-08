@@ -794,6 +794,12 @@ impl Libp2pTransport {
                                             request_response::Event::Message { peer, message, .. } => {
                                                 match message {
                                                     request_response::Message::Request { request, channel, .. } => {
+                                                        eprintln!(
+                                                            "[distributed][server] inbound request peer={} message_id={} swarm={}",
+                                                            peer,
+                                                            request.message_id,
+                                                            config.swarm_identifier()
+                                                        );
                                                         debug_log(format!(
                                                             "inbound request from peer_id={} message_id={}",
                                                             peer,
@@ -805,6 +811,7 @@ impl Libp2pTransport {
                                                             accelerator: None,
                                                             transport: "libp2p".to_string(),
                                                         };
+                                                        let request_id = request.message_id;
 
                                                         let response = Libp2pTransport::process_swarm_message(
                                                             &local_peer,
@@ -827,6 +834,12 @@ impl Libp2pTransport {
                                                             .behaviour_mut()
                                                             .request_response
                                                             .send_response(channel, response);
+                                                                eprintln!(
+                                                                    "[distributed][server] response sent peer={} request_id={} swarm={}",
+                                                                    peer,
+                                                            request_id,
+                                                                    config.swarm_identifier()
+                                                                );
                                                     }
                                                     request_response::Message::Response { request_id, response } => {
                                                         debug_log(format!(
