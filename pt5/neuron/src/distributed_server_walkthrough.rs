@@ -24,6 +24,18 @@ fn parse_u64_env(var_name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
+fn parse_bool_env(var_name: &str, default: bool) -> bool {
+    env::var(var_name)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(default)
+}
+
 fn env_first(names: &[&str]) -> Option<String> {
     names.iter().find_map(|name| {
         env::var(name)
@@ -34,6 +46,7 @@ fn env_first(names: &[&str]) -> Option<String> {
 }
 
 fn run_impl() -> Result<(), String> {
+
     println!("\nDistributed server walkthrough");
 
     let swarm_name = env_first(&["NEURALNET_DISTRIBUTED_SWARM_NAME", "NEURALNET_SWARM_NAME"])
@@ -68,50 +81,62 @@ fn run_impl() -> Result<(), String> {
     })
     .map_err(|error| format!("failed to start distributed server runtime: {error}"))?;
 
-    let client_peer = RemotePeerDescriptor {
-        peer_id: env_first(&[
-            "NEURALNET_DISTRIBUTED_CLIENT_PEER",
-            "NEURON_DISTRIBUTED_CLIENT_PEER_ID",
-        ])
-        .unwrap_or_else(|| "neuron-client-1".to_string()),
-        platform: "app-client".to_string(),
-        accelerator: None,
-        transport: "libp2p".to_string(),
-    };
-
-    let client_transport = Libp2pTransport::new(client_peer, transport)
-        .map_err(|error| format!("failed to start distributed client transport: {error}"))?;
-
-    let executor = TransportBackedDistributedExecutor::new(
-        DistributedExecutionPolicy::coordinator_default(),
-        DistributedExecutorCapabilities::default(),
-        client_transport,
-    );
-
-    let input = Tensor4D::from_vec(1, 1, 1, 4, vec![-2.0, -0.5, 0.25, 3.0])
-        .map_err(|error| format!("failed to build sample tensor: {error}"))?;
-    let job = DistributedTensorJob::TensorOp(RemoteTensorOpRequest {
-        operation: RemoteTensorOp::Relu { input },
-        parameter_version: Some(1),
-    });
-
-    let result = executor
-        .execute(&server_peer, job)
-        .map_err(|error| format!("distributed execution failed: {error}"))?;
-
     println!(
-        "  server peer={} swarm={} result={result:?}",
+        "  server peer={} swarm={}",
         runtime.local_peer().peer_id,
         swarm_name
     );
     println!("  discovered peers: {:?}", runtime.discovered_peers());
 
-    let wait_secs = parse_u64_env("NEURON_DISTRIBUTED_SERVER_WAIT_SECS", 5);
+    let run_self_test = parse_bool_env("NEURON_DISTRIBUTED_SERVER_SELF_TEST", false);
+    if run_self_test {
+        let client_peer = RemotePeerDescriptor {
+            peer_id: env_first(&[
+                "NEURALNET_DISTRIBUTED_CLIENT_PEER",
+                "NEURON_DISTRIBUTED_CLIENT_PEER_ID",
+            ])
+            .unwrap_or_else(|| "neuron-client-1".to_string()),
+            platform: "app-client".to_string(),
+            accelerator: None,
+            transport: "libp2p".to_string(),
+        };
+
+        let client_transport = Libp2pTransport::new(client_peer, transport)
+            .map_err(|error| format!("failed to start distributed client transport: {error}"))?;
+
+        let executor = TransportBackedDistributedExecutor::new(
+            DistributedExecutionPolicy::coordinator_default(),
+            DistributedExecutorCapabilities::default(),
+            client_transport,
+        );
+
+        let input = Tensor4D::from_vec(1, 1, 1, 4, vec![-2.0, -0.5, 0.25, 3.0])
+            .map_err(|error| format!("failed to build sample tensor: {error}"))?;
+        let job = DistributedTensorJob::TensorOp(RemoteTensorOpRequest {
+            operation: RemoteTensorOp::Relu { input },
+            parameter_version: Some(1),
+        });
+
+        let result = executor
+            .execute(&server_peer, job)
+            .map_err(|error| format!("distributed self-test execution failed: {error}"))?;
+        println!("  self-test result={result:?}");
+    }
+
+    let wait_secs = parse_u64_env("NEURON_DISTRIBUTED_SERVER_WAIT_SECS", 0);
+    if wait_secs == 0 {
+        println!("  server is running (press Ctrl+C to stop)");
+        loop {
+            runtime.await_events_for(Duration::from_secs(1));
+        }
+    }
+
     println!("  awaiting external events for {wait_secs}s...");
     runtime.await_events_for(Duration::from_secs(wait_secs));
     println!("  server uptime: {:?}", runtime.uptime());
 
     Ok(())
+    
 }
 
 pub fn run_distributed_server_walkthrough() {
