@@ -1,133 +1,119 @@
 
-# Pt.5 Learning
+# Neuron App
 
-This phase adds CNN-ready tensor tooling and wires it into both the `neuralnet` library and the `neuron` app walkthrough.
+Neuron is the runnable companion app for the `neuralnet` library. It is designed to showcase the library in practice, compare backend behavior, and demonstrate realistic training, inference, and multimodal workflows.
 
-## What Changed
+If you want to understand what the library does, how it performs, and how it behaves across CPU, CUDA, and MLX environments, this is the place to start.
 
-- Pattern classifier + trainer bridge
-- Training loop with checkpoint lifecycle (epoch, best, last, resume)
-- Tensor foundation (`Tensor4D`) with CNN primitives
-- CNN feature extractor for image-to-feature token conversion
-- Batch image training/evaluation with confusion matrix + micro metrics
-- App walkthrough integration for the CNN image path
+## What You Get
 
-## Project Layout
+- A command-line entry point for exercising the library end to end.
+- Walkthroughs for multimodal demos, trainer behavior, CNN training, batch inference, and RAG flows.
+- A practical way to compare CPU, CUDA, and MLX execution on the current machine.
+- A repeatable harness for validating performance, quality, and backend policy changes.
 
-- `neuralnet/`: core library (brain, training, tensors, integration tests)
-- `neuron/`: runnable app walkthrough and demo harness
+## At a Glance
 
-## Run And Test
+- CPU is the default and the stable baseline.
+- GPU-style execution is enabled only when the relevant backend is available.
+- The app reflects the same runtime backend policy used by the library.
+- The walkthroughs are intentionally concrete so they can serve as reference examples.
 
-From the repository root (`pt5`):
+## Included Walkthroughs
 
-```bash
-cd neuralnet && cargo test
-```
+When you run the app, it executes the following demos in sequence:
 
-```bash
-cd neuron && cargo test
-```
+- Multimodal brain demo
+- Trainer walkthrough
+- CNN classifier walkthrough
+- RAG walkthrough
+- RAG dataset walkthrough
+- Multimodal tensor walkthrough
+- Brain stress walkthrough
 
-```bash
-cd neuron && cargo run --quiet
-```
+These are intentionally written to demonstrate current library behavior, not to provide a general-purpose UI.
 
-## App Walkthrough (Trainer)
+## Recommended Workflow
 
-The trainer walkthrough is in `neuron/src/trainer_walkthrough.rs` and now includes six steps.
+1. Run the app on CPU first to see the default behavior.
+2. Enable MLX or CUDA only when your environment is ready.
+3. Compare the walkthrough output to confirm backend policy, throughput, and quality changes.
+4. Use the app as a sanity check before promoting library changes into a larger system.
 
-- Step 1: single labeled training sample
-- Step 2: batch training
-- Step 3: evaluation + confusion matrix + macro/micro metrics
-- Step 4: supervised training loop with early stopping/checkpoints
-- Step 5: resume from best checkpoint
-- Step 6: CNN image path demo on app pipeline
+## Why It Matters
 
-## App Walkthrough (Standalone CNN Classifier)
+- CPU remains the stable baseline for all runs.
+- Accelerators can be enabled when available without changing the app structure.
+- The app reflects the runtime backend selection and fallback policy used by the library.
+- It is useful both as a test surface and as a reference implementation for integrating the library into a larger service.
 
-The standalone trainable image-classifier walkthrough is in `neuron/src/cnn_classifier_walkthrough.rs`.
+## Quick Start
 
-It validates:
-
-- pre-train probe behavior (strict confidence threshold -> unknown)
-- repeated batch training on synthetic image patterns
-- post-train probe behavior
-- confusion matrix + label metrics using the CNN trainer adapter
-
-## Step 6: CNN Image Path Demo
-
-Step 6 enables the optional CNN image feature path on a fresh `MultiModalBrain`:
-
-- Calls `enable_default_cnn_image_path()`
-- Trains on synthetic 8x8 grayscale image patterns
-- Evaluates with confusion matrix and micro-F1
-- Shows pre-train vs post-train probe behavior
-
-Expected behavior in output:
-
-- `pre-train image probe -> <unknown>`
-- `cnn image final eval: accuracy=... micro_f1=...`
-- confusion matrix rows for `animal_cat`, `animal_dog`, and unknown image bucket
-- `post-train image probe -> animal_cat (...)`
-
-## CNN Classifier Validation
-
-Use these focused commands when validating the standalone trainable image classifier path:
+Run the default CPU-backed app:
 
 ```bash
-cd neuralnet && cargo test cnn_classifier -- --nocapture
+cargo run
 ```
+
+Run with MLX when your Apple Silicon environment is ready:
 
 ```bash
-cd neuralnet && cargo test cnn_classifier_snapshot_round_trip_preserves_predictions -- --nocapture
+cargo run --features offloading-mlx
 ```
+
+Run with CUDA when the feature and hardware are available:
 
 ```bash
-cd neuralnet && cargo test cnn_trainer -- --nocapture
+cargo run --features offloading-cuda
 ```
+
+## Backend Support
+
+### CPU
+
+CPU is always available and is the default execution path.
+
+### CUDA
+
+CUDA support is feature-gated and remains less battle-tested than the CPU path.
+
+### MLX for Apple Silicon
+
+The app and library can run with MLX on Apple Silicon, but you must point the build at an external MLX prefix.
+
+The external prefix must contain:
+
+- `lib/libmlx.dylib`
+- `lib/libjaccl.dylib`
+- `lib/mlx.metallib`
+- `share/cmake/MLX/MLXConfig.cmake`
+
+Configure it with:
 
 ```bash
-cd neuralnet && cargo test linear_head -- --nocapture
+export APPLE_MLX_PREFIX="/absolute/path/to/mlx-prefix"
 ```
 
-Use these broader commands for full regression confidence:
+or, if you prefer a local link:
 
 ```bash
-cd neuralnet && cargo test
+ln -s /absolute/path/to/mlx-prefix ../library/neuralnet/vendor/apple-mlx/.linked/mlx-prefix
 ```
+
+If you use Homebrew MLX, point to the prefix explicitly:
 
 ```bash
-cd neuron && cargo test cnn_classifier_walkthrough -- --nocapture
+export APPLE_MLX_PREFIX="/opt/homebrew/opt/mlx"
 ```
+
+If the Metal tooling is not ready, confirm Xcode Command Line Tools are set correctly:
 
 ```bash
-cd neuron && cargo run --quiet
+sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+xcrun -sdk macosx metal -v
 ```
 
-Expected validation signals:
+## Notes
 
-- Core classifier tests pass (simple pattern learning + invalid image rejection).
-- CNN classifier snapshot round-trip test passes (save/load preserves predictions).
-- Trainer adapter tests pass (batch counts, confusion matrix wiring, confidence-threshold behavior, loss-trend behavior).
-- Linear head tests pass (probability normalization, input-gradient shape, loss decrease).
-- App walkthrough prints pre-train unknown and post-train labeled prediction for the cat probe.
-- App walkthrough prints confusion matrix and label metrics for the CNN classifier flow.
-
-## Key Files
-
-- `neuralnet/src/tensor/tensor4d.rs`: tensor structure + `conv2d_valid` + `max_pool2d`
-- `neuralnet/src/cnn/feature_extractor.rs`: CNN feature extraction for images
-- `neuralnet/src/cnn/classifier.rs`: trainable CNN image classifier backed by `LinearHead`, including save/load snapshot lifecycle and optional two-layer conv backbone (`new_two_layer`)
-- `neuralnet/src/core/brain.rs`: optional classifier preprocessing hook for image CNN path
-- `neuralnet/src/cnn/cnn_trainer.rs`: image trainer adapter that emits standard training reports/metrics
-- `neuralnet/src/training/trainer.rs`: training/evaluation + confusion matrix + macro/micro metrics
-- `neuralnet/src/core/integration.rs`: supervised pipeline + integration tests
-- `neuron/src/trainer_fixtures.rs`: app walkthrough fixtures, including CNN image samples
-- `neuron/src/trainer_walkthrough.rs`: app-side walkthrough and CNN step
-- `neuron/src/cnn_classifier_walkthrough.rs`: dedicated standalone CNN classifier walkthrough
-
-## Current Baseline
-
-- `neuralnet`: all tests passing
-- `neuron`: all tests passing
+- The app is intentionally focused on demonstrating the library rather than providing a general-purpose UI.
+- It is a good place to validate backend policy, performance changes, and new inference/training workflows.
