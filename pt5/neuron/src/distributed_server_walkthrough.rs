@@ -188,4 +188,5 @@ pub fn has_help_flag(args: &[String]) -> bool {
 pub fn print_distributed_server_help() {
     println!("  --p2p                 Start distributed server walkthrough mode");
     println!("  --distributed-server  Alias for --p2p");
+    println!("  env: NEURALNET_DISTRIBUTED_DEBUG=1 enables transport connectivity logs");
 }
