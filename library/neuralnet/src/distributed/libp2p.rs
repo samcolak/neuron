@@ -795,15 +795,14 @@ impl Libp2pTransport {
                                                 match message {
                                                     request_response::Message::Request { request, channel, .. } => {
                                                         eprintln!(
-                                                            "[distributed][server] inbound request peer={} message_id={} swarm={}",
+                                                            "[distributed][server] inbound request peer={}",
+                                                            peer
+                                                        );
+                                                        debug_log(format!(
+                                                            "inbound request peer_id={} message_id={} swarm={}",
                                                             peer,
                                                             request.message_id,
                                                             config.swarm_identifier()
-                                                        );
-                                                        debug_log(format!(
-                                                            "inbound request from peer_id={} message_id={}",
-                                                            peer,
-                                                            request.message_id
                                                         ));
                                                         let source = RemotePeerDescriptor {
                                                             peer_id: peer.to_string(),
@@ -811,7 +810,6 @@ impl Libp2pTransport {
                                                             accelerator: None,
                                                             transport: "libp2p".to_string(),
                                                         };
-                                                        let request_id = request.message_id;
 
                                                         let response = Libp2pTransport::process_swarm_message(
                                                             &local_peer,
@@ -835,17 +833,14 @@ impl Libp2pTransport {
                                                             .request_response
                                                             .send_response(channel, response);
                                                                 eprintln!(
-                                                                    "[distributed][server] response sent peer={} request_id={} swarm={}",
-                                                                    peer,
-                                                            request_id,
-                                                                    config.swarm_identifier()
+                                                                    "[distributed][server] response sent peer={}",
+                                                                    peer
                                                                 );
                                                     }
                                                     request_response::Message::Response { request_id, response } => {
                                                         debug_log(format!(
-                                                            "inbound response request_id={:?} message_id={}",
-                                                            request_id,
-                                                            response.message_id
+                                                            "inbound response request_id={:?}",
+                                                            request_id
                                                         ));
                                                         if let Some(tx) = pending_responses.remove(&request_id) {
                                                             let _ = tx.send(Ok(response));
