@@ -1200,7 +1200,6 @@ impl DistributedTransport for Libp2pTransport {
     }
 
     fn discover_peers(&self) -> Result<Vec<TransportPeerRecord>, DistributedTensorError> {
-
         let mut peers = self.bootstrap_peer_records();
 
         if let Ok(registry) = local_swarm_registry().lock()
@@ -1226,7 +1225,33 @@ impl DistributedTransport for Libp2pTransport {
         if let Ok(network_peers) = self.discover_network_peers() {
             peers.extend(network_peers);
         }
-        Ok(peers)
+
+        let mut deduped: HashMap<String, TransportPeerRecord> = HashMap::new();
+        for peer in peers {
+            if peer.descriptor.peer_id == self.local_peer.peer_id {
+                continue;
+            }
+
+            deduped
+                .entry(peer.descriptor.peer_id.clone())
+                .and_modify(|existing| {
+                    for address in &peer.addresses {
+                        if !existing.addresses.contains(address) {
+                            existing.addresses.push(address.clone());
+                        }
+                    }
+                    existing.is_reachable |= peer.is_reachable;
+                    if existing.average_rtt_ms.is_none() {
+                        existing.average_rtt_ms = peer.average_rtt_ms;
+                    }
+                    if existing.last_seen_unix_ms.is_none() {
+                        existing.last_seen_unix_ms = peer.last_seen_unix_ms;
+                    }
+                })
+                .or_insert(peer);
+        }
+
+        Ok(deduped.into_values().collect())
 
     }
 
