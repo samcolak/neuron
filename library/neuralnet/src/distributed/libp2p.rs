@@ -824,10 +824,10 @@ impl Libp2pTransport {
                                                             .behaviour_mut()
                                                             .request_response
                                                             .send_response(channel, response);
-                                                                eprintln!(
-                                                                    "[distributed][server] response sent peer={}",
-                                                                    peer
-                                                                );
+                                                                // eprintln!(
+                                                                //     "[distributed][server] response sent peer={}",
+                                                                //     peer
+                                                                // );
                                                     }
                                                     request_response::Message::Response { request_id, response } => {
                                                         debug_log(format!("inbound response request_id={:?}", request_id));
