@@ -1,4 +1,6 @@
 use std::env;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 
 use crate::tensor::device::BackendTrainingCapabilities;
 use crate::tensor::offloading::{cpu_backend, cuda_backend, mlx_backend};
@@ -30,13 +32,91 @@ impl TensorBackendKind {
             _ => None,
         }
     }
+    
+}
 
+fn parse_bool_env(var_name: &str) -> Option<bool> {
+    let value = env::var(var_name).ok()?;
+    let normalized = value.trim().to_ascii_lowercase();
+    if matches!(normalized.as_str(), "1" | "true" | "yes" | "on") {
+        Some(true)
+    } else if matches!(normalized.as_str(), "0" | "false" | "no" | "off") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+pub fn cpu_fallback_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| parse_bool_env("NEURALNET_ALLOW_CPU_FALLBACK").unwrap_or(true))
+}
+
+pub fn native_dw_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| parse_bool_env("NEURALNET_NATIVE_DW").unwrap_or(true))
+}
+
+pub fn native_dinput_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| parse_bool_env("NEURALNET_NATIVE_DINPUT").unwrap_or(false))
 }
 
 #[derive(Clone, Copy)]
-struct ActiveBackendSelection {
+struct BackendEndpoint {
     kind: TensorBackendKind,
     backend: &'static dyn TensorBackend,
+}
+
+struct TensorBackendRouter {
+    primary: Option<BackendEndpoint>,
+    fallback: BackendEndpoint,
+    degraded: AtomicBool,
+}
+
+impl TensorBackendRouter {
+
+    fn new(primary: Option<BackendEndpoint>) -> Self {
+        static CPU: CpuTensorBackend = CpuTensorBackend;
+        Self {
+            primary,
+            fallback: BackendEndpoint {
+                kind: TensorBackendKind::Cpu,
+                backend: &CPU,
+            },
+            degraded: AtomicBool::new(false),
+        }
+    }
+
+    fn selected_endpoint(&self) -> BackendEndpoint {
+        if self.degraded.load(Ordering::Relaxed) {
+            self.fallback
+        } else {
+            self.primary.unwrap_or(self.fallback)
+        }
+    }
+
+    fn call_with_failover<T, F>(&self, op: F) -> Result<T, TensorError>
+    where
+        F: Fn(&dyn TensorBackend) -> Result<T, TensorError>,
+    {
+        if self.degraded.load(Ordering::Relaxed) || self.primary.is_none() {
+            return op(self.fallback.backend);
+        }
+
+        let primary = self.primary.expect("primary checked above");
+        match op(primary.backend) {
+            Ok(value) => Ok(value),
+            Err(primary_error) => {
+                self.degraded.store(true, Ordering::Relaxed);
+                match op(self.fallback.backend) {
+                    Ok(value) => Ok(value),
+                    Err(_) => Err(primary_error),
+                }
+            }
+        }
+    }
+
 }
 
 pub trait TensorBackend: Send + Sync {
@@ -70,6 +150,28 @@ pub trait TensorBackend: Send + Sync {
     fn relu_inplace(&self, input: &mut Tensor4D);
 
     #[allow(clippy::too_many_arguments)]
+    fn conv_block_backward_gradients(
+        &self,
+        kernels: &Tensor4D,
+        input: &Tensor4D,
+        conv_pre_activation: &Tensor4D,
+        pool_indices: &[(usize, usize)],
+        pooled_shape: (usize, usize, usize, usize),
+        pooled_grad: &Tensor4D,
+        compute_input_grad: bool,
+    ) -> Result<ConvBlockBackwardGradients, TensorError> {
+        cpu_conv_block_backward_gradients(
+            kernels,
+            input,
+            conv_pre_activation,
+            pool_indices,
+            pooled_shape,
+            pooled_grad,
+            compute_input_grad,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn conv_relu_max_pool2d_valid(
         &self,
         input: &Tensor4D,
@@ -82,6 +184,7 @@ pub trait TensorBackend: Send + Sync {
         pool_stride_h: usize,
         pool_stride_w: usize,
     ) -> Result<Tensor4D, TensorError> {
+        
         let mut conv = self.conv2d_valid(input, kernels, bias, conv_stride_h, conv_stride_w)?;
         self.relu_inplace(&mut conv);
         self.max_pool2d(
@@ -91,12 +194,9 @@ pub trait TensorBackend: Send + Sync {
             pool_stride_h,
             pool_stride_w,
         )
+
     }
 
-    /// Fused forward: conv→relu→pool (→ optional second block) → global average pool.
-    /// Returns the flat feature vector directly. Backends that support on-device
-    /// lazy evaluation (MLX) override this to avoid intermediate host round-trips.
-    /// `block2` is `Some((kernels, bias))` when a second conv block is present.
     #[allow(clippy::too_many_arguments)]
     fn conv_blocks_to_feature_vec(
         &self,
@@ -111,6 +211,7 @@ pub trait TensorBackend: Send + Sync {
         pool_stride_h: usize,
         pool_stride_w: usize,
     ) -> Result<Vec<f32>, TensorError> {
+
         let block1_out = self.conv_relu_max_pool2d_valid(
             input,
             block1_kernels,
@@ -141,9 +242,114 @@ pub trait TensorBackend: Send + Sync {
 
         let gap = self.global_average_pool2d(&final_out)?;
         Ok(gap.first_sample_features())
+    
     }
 
-    #[allow(clippy::too_many_arguments)]
+}
+
+impl TensorBackend for TensorBackendRouter {
+    fn name(&self) -> &'static str {
+        self.selected_endpoint().backend.name()
+    }
+
+    fn training_capabilities(&self) -> BackendTrainingCapabilities {
+        self.selected_endpoint().backend.training_capabilities()
+    }
+
+    fn conv2d_valid(
+        &self,
+        input: &Tensor4D,
+        kernels: &Tensor4D,
+        bias: Option<&[f32]>,
+        stride_h: usize,
+        stride_w: usize,
+    ) -> Result<Tensor4D, TensorError> {
+        self.call_with_failover(|backend| backend.conv2d_valid(input, kernels, bias, stride_h, stride_w))
+    }
+
+    fn max_pool2d(
+        &self,
+        input: &Tensor4D,
+        window_h: usize,
+        window_w: usize,
+        stride_h: usize,
+        stride_w: usize,
+    ) -> Result<Tensor4D, TensorError> {
+        self.call_with_failover(|backend| backend.max_pool2d(input, window_h, window_w, stride_h, stride_w))
+    }
+
+    fn global_average_pool2d(&self, input: &Tensor4D) -> Result<Tensor4D, TensorError> {
+        self.call_with_failover(|backend| backend.global_average_pool2d(input))
+    }
+
+    fn relu_inplace(&self, input: &mut Tensor4D) {
+
+        if self.degraded.load(Ordering::Relaxed) {
+            self.fallback.backend.relu_inplace(input);
+        } else if let Some(primary) = self.primary {
+            primary.backend.relu_inplace(input);
+        } else {
+            self.fallback.backend.relu_inplace(input);
+        }
+
+    }
+
+    fn conv_relu_max_pool2d_valid(
+        &self,
+        input: &Tensor4D,
+        kernels: &Tensor4D,
+        bias: Option<&[f32]>,
+        conv_stride_h: usize,
+        conv_stride_w: usize,
+        pool_window_h: usize,
+        pool_window_w: usize,
+        pool_stride_h: usize,
+        pool_stride_w: usize,
+    ) -> Result<Tensor4D, TensorError> {
+        self.call_with_failover(|backend| {
+            backend.conv_relu_max_pool2d_valid(
+                input,
+                kernels,
+                bias,
+                conv_stride_h,
+                conv_stride_w,
+                pool_window_h,
+                pool_window_w,
+                pool_stride_h,
+                pool_stride_w,
+            )
+        })
+    }
+
+    fn conv_blocks_to_feature_vec(
+        &self,
+        input: &Tensor4D,
+        block1_kernels: &Tensor4D,
+        block1_bias: &[f32],
+        block2: Option<(&Tensor4D, &[f32])>,
+        conv_stride_h: usize,
+        conv_stride_w: usize,
+        pool_window_h: usize,
+        pool_window_w: usize,
+        pool_stride_h: usize,
+        pool_stride_w: usize,
+    ) -> Result<Vec<f32>, TensorError> {
+        self.call_with_failover(|backend| {
+            backend.conv_blocks_to_feature_vec(
+                input,
+                block1_kernels,
+                block1_bias,
+                block2,
+                conv_stride_h,
+                conv_stride_w,
+                pool_window_h,
+                pool_window_w,
+                pool_stride_h,
+                pool_stride_w,
+            )
+        })
+    }
+
     fn conv_block_backward_gradients(
         &self,
         kernels: &Tensor4D,
@@ -154,15 +360,17 @@ pub trait TensorBackend: Send + Sync {
         pooled_grad: &Tensor4D,
         compute_input_grad: bool,
     ) -> Result<ConvBlockBackwardGradients, TensorError> {
-        cpu_conv_block_backward_gradients(
-            kernels,
-            input,
-            conv_pre_activation,
-            pool_indices,
-            pooled_shape,
-            pooled_grad,
-            compute_input_grad,
-        )
+        self.call_with_failover(|backend| {
+            backend.conv_block_backward_gradients(
+                kernels,
+                input,
+                conv_pre_activation,
+                pool_indices,
+                pooled_shape,
+                pooled_grad,
+                compute_input_grad,
+            )
+        })
     }
 }
 
@@ -255,16 +463,11 @@ pub(crate) fn cpu_conv_block_backward_gradients(
             *grad = 0.0;
         }
     }
-
     let (_, in_channels, kernel_h, kernel_w) = kernels.shape();
     let (_, _, conv_h, conv_w) = conv_pre_activation.shape();
 
-    let mut kernel_grad = Tensor4D::zeros(channels, in_channels, kernel_h, kernel_w);
-    let mut bias_grad = vec![0.0f32; channels];
     let conv_plane = conv_h * conv_w;
-    let input_plane = in_h * in_w;
-    let input_batch_plane = in_channels * input_plane;
-    let kernel_plane = kernel_h * kernel_w;
+    let mut bias_grad = vec![0.0f32; channels];
 
     for (out_c, bias_slot) in bias_grad.iter_mut().enumerate() {
         let mut bias_accum = 0.0f32;
@@ -275,7 +478,13 @@ pub(crate) fn cpu_conv_block_backward_gradients(
             bias_accum += conv_channel.iter().copied().sum::<f32>();
         }
         *bias_slot = bias_accum;
+    }
+    let mut kernel_grad = Tensor4D::zeros(channels, in_channels, kernel_h, kernel_w);
+    let input_plane = in_h * in_w;
+    let input_batch_plane = in_channels * input_plane;
+    let kernel_plane = kernel_h * kernel_w;
 
+    for out_c in 0..channels {
         for in_c in 0..in_channels {
             let kernel_channel_base = (out_c * in_channels + in_c) * kernel_plane;
             for ky in 0..kernel_h {
@@ -300,9 +509,7 @@ pub(crate) fn cpu_conv_block_backward_gradients(
         }
 
     }
-
     let input_grad = if compute_input_grad {
-
         let mut input_grad = Tensor4D::zeros(batch, in_channels, in_h, in_w);
 
         for sample in 0..batch {
@@ -394,21 +601,24 @@ pub fn preferred_backend_kind() -> Option<TensorBackendKind> {
         .and_then(|value| TensorBackendKind::parse(value.as_str()))
 }
 
-fn backend_for_kind(kind: TensorBackendKind) -> Option<ActiveBackendSelection> {
+fn backend_for_kind(kind: TensorBackendKind) -> Option<BackendEndpoint> {
+
     match kind {
+
         TensorBackendKind::Cpu => {
             static CPU: CpuTensorBackend = CpuTensorBackend;
-            Some(ActiveBackendSelection {
+            Some(BackendEndpoint {
                 kind: TensorBackendKind::Cpu,
                 backend: &CPU,
             })
         }
+
         TensorBackendKind::Cuda => {
             #[cfg(feature = "offloading-cuda")]
             {
                 if cuda_backend_available() {
                     static CUDA: CudaTensorBackend = CudaTensorBackend;
-                    return Some(ActiveBackendSelection {
+                    return Some(BackendEndpoint {
                         kind: TensorBackendKind::Cuda,
                         backend: &CUDA,
                     });
@@ -416,12 +626,13 @@ fn backend_for_kind(kind: TensorBackendKind) -> Option<ActiveBackendSelection> {
             }
             None
         }
+
         TensorBackendKind::Mlx => {
             #[cfg(feature = "offloading-mlx")]
             {
                 if mlx_backend_available() {
                     static MLX: MlxTensorBackend = MlxTensorBackend;
-                    return Some(ActiveBackendSelection {
+                    return Some(BackendEndpoint {
                         kind: TensorBackendKind::Mlx,
                         backend: &MLX,
                     });
@@ -429,31 +640,39 @@ fn backend_for_kind(kind: TensorBackendKind) -> Option<ActiveBackendSelection> {
             }
             None
         }
+
     }
+
 }
 
-fn resolve_active_backend() -> ActiveBackendSelection {
+fn resolve_primary_backend() -> Option<BackendEndpoint> {
+
     if let Some(preferred) = preferred_backend_kind()
         && let Some(selection) = backend_for_kind(preferred)
     {
-        return selection;
+        if selection.kind != TensorBackendKind::Cpu {
+            return Some(selection);
+        }
+        return None;
     }
 
-    for fallback in [
-        TensorBackendKind::Cuda,
-        TensorBackendKind::Mlx,
-        TensorBackendKind::Cpu,
-    ] {
-        if let Some(selection) = backend_for_kind(fallback) {
-            return selection;
+    for candidate in [TensorBackendKind::Cuda, TensorBackendKind::Mlx] {
+        if let Some(selection) = backend_for_kind(candidate) {
+            return Some(selection);
         }
     }
 
-    unreachable!("cpu backend must always be available")
+    None
+
+}
+
+fn active_backend_router() -> &'static TensorBackendRouter {
+    static ROUTER: OnceLock<TensorBackendRouter> = OnceLock::new();
+    ROUTER.get_or_init(|| TensorBackendRouter::new(resolve_primary_backend()))
 }
 
 pub fn active_backend() -> &'static dyn TensorBackend {
-    resolve_active_backend().backend
+    active_backend_router()
 }
 
 pub fn active_backend_name() -> &'static str {
@@ -465,7 +684,8 @@ pub fn active_backend_training_capabilities() -> BackendTrainingCapabilities {
 }
 
 pub fn active_backend_label() -> &'static str {
-    match resolve_active_backend().kind {
+
+    match active_backend_router().selected_endpoint().kind {
         TensorBackendKind::Cpu => "cpu",
         TensorBackendKind::Cuda => "cuda",
         TensorBackendKind::Mlx => {
@@ -479,6 +699,7 @@ pub fn active_backend_label() -> &'static str {
             }
         }
     }
+
 }
 
 #[cfg(test)]
@@ -531,6 +752,7 @@ mod tests {
 
     #[test]
     fn cpu_backend_conv_matches_tensor4d_conv() {
+
         let backend = cpu_backend();
 
         let input = Tensor4D::from_vec(

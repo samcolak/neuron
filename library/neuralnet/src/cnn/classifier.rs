@@ -11,16 +11,19 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-use crate::tensor::backend::{active_backend, ConvBlockBackwardGradients};
+use crate::tensor::backend::{
+    active_backend,
+    ConvBlockBackwardGradients,
+};
 use crate::tensor::adapters::{
     image_batch_to_tensor_nchw_resized_with_channels,
     image_bytes_to_tensor_nchw_resized_with_channels,
     TensorAdapterError,
 };
+use crate::cnn::data_pipeline::ImageTensorShape;
 #[cfg(feature = "offloading-mlx")]
 use crate::tensor::offloading::mlx_backend::{
     mlx_conv2d_valid_with_mirrored_params,
-    mlx_conv_blocks_to_feature_vec_with_mirrored_params,
 };
 use crate::tensor::parameters::ConvParameterState;
 use crate::tensor::tensor4d::{Tensor4D, TensorError};
@@ -130,8 +133,7 @@ pub struct CnnImageClassifier {
     input_channels: usize,
     class_labels: Vec<String>,
     label_to_index: BTreeMap<String, usize>,
-    conv1: ConvParameterState,
-    conv2: Option<ConvParameterState>,
+    feature_blocks: Vec<ConvParameterState>,
     feature_learning_rate: f32,
     head: LinearHead,
     min_confidence: f32,
@@ -145,10 +147,8 @@ struct CnnImageClassifierSnapshot {
     input_channels: usize,
     class_labels: Vec<String>,
     label_to_index: BTreeMap<String, usize>,
-    conv1_kernels: Tensor4D,
-    conv1_bias: Vec<f32>,
-    conv2_kernels: Option<Tensor4D>,
-    conv2_bias: Option<Vec<f32>>,
+    feature_block_kernels: Vec<Tensor4D>,
+    feature_block_biases: Vec<Vec<f32>>,
     feature_learning_rate: f32,
     head: LinearHead,
     min_confidence: f32,
@@ -175,10 +175,8 @@ impl From<LegacyCnnImageClassifierSnapshot> for CnnImageClassifierSnapshot {
             input_channels: 1,
             class_labels: value.class_labels,
             label_to_index: value.label_to_index,
-            conv1_kernels: value.feature_kernels,
-            conv1_bias: value.feature_bias,
-            conv2_kernels: None,
-            conv2_bias: None,
+            feature_block_kernels: vec![value.feature_kernels],
+            feature_block_biases: vec![value.feature_bias],
             feature_learning_rate: value.feature_learning_rate,
             head: value.head,
             min_confidence: value.min_confidence,
@@ -196,14 +194,12 @@ struct ConvBlockCache {
 
 #[derive(Debug, Clone)]
 struct ForwardCache {
-    block1: ConvBlockCache,
-    block2: Option<ConvBlockCache>,
+    blocks: Vec<ConvBlockCache>,
 }
 
 #[derive(Debug, Clone)]
 struct BatchForwardCache {
-    block1: ConvBlockCache,
-    block2: Option<ConvBlockCache>,
+    blocks: Vec<ConvBlockCache>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -241,6 +237,36 @@ pub struct CnnCoalescingPredictOptions {
     pub enable_batch_preprocess: bool,
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CnnForwardStageMetrics {
+    pub conv_elapsed_ms: f64,
+    pub pool_elapsed_ms: f64,
+    pub global_pool_elapsed_ms: f64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CnnBackpropStageMetrics {
+    pub pooled_grad_elapsed_ms: f64,
+    pub gradients_elapsed_ms: f64,
+    pub apply_update_elapsed_ms: f64,
+    pub input_grad_transfer_elapsed_ms: f64,
+    pub unpool_relu_elapsed_ms: f64,
+    pub dw_elapsed_ms: f64,
+    pub dinput_elapsed_ms: f64,
+    pub bias_grad_elapsed_ms: f64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CnnTrainTimingReport {
+    pub input_elapsed_ms: f64,
+    pub feature_elapsed_ms: f64,
+    pub head_elapsed_ms: f64,
+    pub backprop_elapsed_ms: f64,
+    pub total_elapsed_ms: f64,
+    pub forward_stage_metrics: CnnForwardStageMetrics,
+    pub backprop_stage_metrics: CnnBackpropStageMetrics,
+}
+
 impl Default for CnnCoalescingPredictOptions {
     fn default() -> Self {
         Self {
@@ -255,6 +281,7 @@ impl Default for CnnCoalescingPredictOptions {
 pub struct CnnCoalescingBatchPredictor<'a> {
     classifier: &'a CnnImageClassifier,
     options: CnnCoalescingPredictOptions,
+    image_shape: Option<ImageTensorShape>,
     pending: Vec<Vec<u8>>,
     ready_predictions: Vec<Option<(String, f32)>>,
     queue_started_at: Option<Instant>,
@@ -385,6 +412,27 @@ impl<'a> CnnCoalescingBatchPredictor<'a> {
         Self {
             classifier,
             options,
+            image_shape: None,
+            pending: Vec::new(),
+            ready_predictions: Vec::new(),
+            queue_started_at: None,
+            flushed_images: 0,
+            flush_count: 0,
+            preprocessing_elapsed_ms: 0.0,
+            model_elapsed_ms: 0.0,
+            total_elapsed_ms: 0.0,
+        }
+    }
+
+    pub fn new_with_shape(
+        classifier: &'a CnnImageClassifier,
+        options: CnnCoalescingPredictOptions,
+        image_shape: ImageTensorShape,
+    ) -> Self {
+        Self {
+            classifier,
+            options,
+            image_shape: Some(image_shape),
             pending: Vec::new(),
             ready_predictions: Vec::new(),
             queue_started_at: None,
@@ -434,13 +482,26 @@ impl<'a> CnnCoalescingBatchPredictor<'a> {
             return Ok(false);
         }
 
-        let report = self.classifier.predict_batch_with_confidence_report(
-            self.pending.as_slice(),
-            CnnBatchPredictOptions {
-                max_micro_batch_size: self.options.max_micro_batch_size,
-                enable_batch_preprocess: self.options.enable_batch_preprocess,
-            },
-        )?;
+        let report = if let Some(shape) = self.image_shape {
+            self.classifier.predict_batch_with_confidence_report_with_dimensions(
+                self.pending.as_slice(),
+                shape.height,
+                shape.width,
+                shape.channels,
+                CnnBatchPredictOptions {
+                    max_micro_batch_size: self.options.max_micro_batch_size,
+                    enable_batch_preprocess: self.options.enable_batch_preprocess,
+                },
+            )?
+        } else {
+            self.classifier.predict_batch_with_confidence_report(
+                self.pending.as_slice(),
+                CnnBatchPredictOptions {
+                    max_micro_batch_size: self.options.max_micro_batch_size,
+                    enable_batch_preprocess: self.options.enable_batch_preprocess,
+                },
+            )?
+        };
 
         self.flushed_images += report.total_images;
         self.flush_count += 1;
@@ -497,12 +558,32 @@ impl CnnImageClassifier {
         CnnCoalescingBatchPredictor::new(self, options)
     }
 
+    pub fn coalescing_batch_predictor_with_dimensions(
+        &self,
+        options: CnnCoalescingPredictOptions,
+        image_shape: ImageTensorShape,
+    ) -> CnnCoalescingBatchPredictor<'_> {
+        CnnCoalescingBatchPredictor::new_with_shape(self, options, image_shape)
+    }
+
     pub fn start_coalescing_scheduler(
         &self,
         options: CnnCoalescingPredictOptions,
     ) -> CnnCoalescingScheduler<'_> {
         CnnCoalescingScheduler {
             predictor: CnnCoalescingBatchPredictor::new(self, options),
+            responders: VecDeque::new(),
+            is_shutdown: false,
+        }
+    }
+
+    pub fn start_coalescing_scheduler_with_dimensions(
+        &self,
+        options: CnnCoalescingPredictOptions,
+        image_shape: ImageTensorShape,
+    ) -> CnnCoalescingScheduler<'_> {
+        CnnCoalescingScheduler {
+            predictor: CnnCoalescingBatchPredictor::new_with_shape(self, options, image_shape),
             responders: VecDeque::new(),
             is_shutdown: false,
         }
@@ -519,6 +600,27 @@ impl CnnImageClassifier {
             input_height,
             input_width,
             &[2],
+            learning_rate,
+        )
+    }
+
+    pub fn new_with_feature_channels_and_kernel_size(
+        class_labels: Vec<String>,
+        input_height: usize,
+        input_width: usize,
+        feature_channels: &[usize],
+        kernel_height: usize,
+        kernel_width: usize,
+        learning_rate: f32,
+    ) -> Result<Self, CnnImageClassifierError> {
+        Self::new_with_feature_channels_and_input_channels_and_kernel_size(
+            class_labels,
+            input_height,
+            input_width,
+            1,
+            feature_channels,
+            kernel_height,
+            kernel_width,
             learning_rate,
         )
     }
@@ -565,6 +667,29 @@ impl CnnImageClassifier {
         feature_channels: &[usize],
         learning_rate: f32,
     ) -> Result<Self, CnnImageClassifierError> {
+        Self::new_with_feature_channels_and_input_channels_and_kernel_size(
+            class_labels,
+            input_height,
+            input_width,
+            input_channels,
+            feature_channels,
+            3,
+            3,
+            learning_rate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_feature_channels_and_input_channels_and_kernel_size(
+        class_labels: Vec<String>,
+        input_height: usize,
+        input_width: usize,
+        input_channels: usize,
+        feature_channels: &[usize],
+        kernel_height: usize,
+        kernel_width: usize,
+        learning_rate: f32,
+    ) -> Result<Self, CnnImageClassifierError> {
 
         if input_height == 0 || input_width == 0 {
             return Err(CnnImageClassifierError::InvalidConfiguration(
@@ -578,9 +703,15 @@ impl CnnImageClassifier {
             ));
         }
 
-        if feature_channels.is_empty() || feature_channels.len() > 2 {
+        if kernel_height == 0 || kernel_width == 0 {
             return Err(CnnImageClassifierError::InvalidConfiguration(
-                "feature channel configuration must contain one or two layers",
+                "kernel height and width must be greater than zero",
+            ));
+        }
+
+        if feature_channels.is_empty() {
+            return Err(CnnImageClassifierError::InvalidConfiguration(
+                "feature channel configuration must contain at least one layer",
             ));
         }
 
@@ -615,20 +746,22 @@ impl CnnImageClassifier {
             ));
         }
 
-        let conv1_out = feature_channels[0];
-        let conv1_kernels = initialize_conv_kernels(conv1_out, input_channels, true)?;
-        let conv1_bias = vec![0.0; conv1_out];
+        let mut feature_blocks = Vec::with_capacity(feature_channels.len());
+        let mut in_channels = input_channels;
+        for (layer_idx, &out_channels) in feature_channels.iter().enumerate() {
+            let kernels = initialize_conv_kernels(
+                out_channels,
+                in_channels,
+                kernel_height,
+                kernel_width,
+                layer_idx == 0,
+            )?;
+            let bias = vec![0.0; out_channels];
+            feature_blocks.push(ConvParameterState::new(kernels, bias));
+            in_channels = out_channels;
+        }
 
-        let (conv2_kernels, conv2_bias, feature_dim) = if feature_channels.len() == 2 {
-            let conv2_out = feature_channels[1];
-            (
-                Some(initialize_conv_kernels(conv2_out, conv1_out, false)?),
-                Some(vec![0.0; conv2_out]),
-                conv2_out,
-            )
-        } else {
-            (None, None, conv1_out)
-        };
+        let feature_dim = feature_channels[feature_channels.len() - 1];
 
         let head = LinearHead::new(feature_dim, normalized_labels.len(), learning_rate)?;
 
@@ -638,11 +771,7 @@ impl CnnImageClassifier {
             input_channels,
             class_labels: normalized_labels,
             label_to_index,
-            conv1: ConvParameterState::new(conv1_kernels, conv1_bias),
-            conv2: match (conv2_kernels, conv2_bias) {
-                (Some(kernels), Some(bias)) => Some(ConvParameterState::new(kernels, bias)),
-                _ => None,
-            },
+            feature_blocks,
             feature_learning_rate: learning_rate.max(0.0),
             head,
             min_confidence: 0.5,
@@ -676,6 +805,63 @@ impl CnnImageClassifier {
 
     pub fn set_head_weight_decay(&mut self, weight_decay: f32) {
         self.head.set_weight_decay(weight_decay);
+    }
+
+    fn forward_feature_stack_with_cache_from_tensor(
+        &self,
+        input: &Tensor4D,
+    ) -> Result<(Tensor4D, ForwardCache), CnnImageClassifierError> {
+
+        let mut current = input.clone();
+        let mut blocks = Vec::with_capacity(self.feature_blocks.len());
+
+        for block in &self.feature_blocks {
+            let (next, cache) = forward_feature_block_with_cache(&current, block)?;
+            current = next;
+            blocks.push(cache);
+        }
+
+        Ok((current, ForwardCache { blocks }))
+    }
+
+    fn forward_feature_stack_with_cache_from_tensor_timed(
+        &self,
+        input: &Tensor4D,
+    ) -> Result<(Tensor4D, ForwardCache, CnnForwardStageMetrics), CnnImageClassifierError> {
+
+        let mut current = input.clone();
+        let mut blocks = Vec::with_capacity(self.feature_blocks.len());
+        let mut metrics = CnnForwardStageMetrics::default();
+
+        for block in &self.feature_blocks {
+            let (next, cache, block_metrics) = forward_feature_block_with_cache_timed(&current, block)?;
+            current = next;
+            blocks.push(cache);
+            metrics.conv_elapsed_ms += block_metrics.conv_elapsed_ms;
+            metrics.pool_elapsed_ms += block_metrics.pool_elapsed_ms;
+        }
+
+        Ok((current, ForwardCache { blocks }, metrics))
+    }
+
+    fn forward_feature_stack_no_cache_from_tensor(
+        &self,
+        input: &Tensor4D,
+    ) -> Result<Tensor4D, CnnImageClassifierError> {
+
+        let mut current = input.clone();
+
+        for block in &self.feature_blocks {
+            current = forward_feature_block_no_cache(&current, block)?;
+        }
+
+        Ok(current)
+    }
+
+    fn sync_feature_blocks_backend_mirror(&mut self) {
+        for block in &mut self.feature_blocks {
+            block.sync_backend_mirror();
+        }
     }
 
     #[cfg(feature = "optimizer-adam")]
@@ -713,46 +899,9 @@ impl CnnImageClassifier {
             self.input_width,
             true,
         )?;
-
-        #[cfg(feature = "offloading-mlx")]
-        if active_backend().name() == "mlx"
-            && let Some(block1) = self.conv1.mlx_mirror_views()
-        {
-            let block2 = self.conv2.as_ref().and_then(|conv2| conv2.mlx_mirror_views());
-            if let Ok(features) = mlx_conv_blocks_to_feature_vec_with_mirrored_params(
-                &input,
-                block1,
-                block2,
-                1,
-                1,
-                2,
-                2,
-                2,
-                2,
-            ) {
-                return Ok(features);
-            }
-        }
-
-        let backend = active_backend();
-        let block2 = self
-            .conv2
-            .as_ref()
-            .map(|conv2| (conv2.kernels(), conv2.bias()));
-
-        backend
-            .conv_blocks_to_feature_vec(
-                &input,
-                self.conv1.kernels(),
-                self.conv1.bias(),
-                block2,
-                1,
-                1,
-                2,
-                2,
-                2,
-                2,
-            )
+        self.forward_feature_stack_no_cache_from_tensor(&input)?
+            .global_average_pool2d()
+            .map(|global| global.first_sample_features())
             .map_err(CnnImageClassifierError::Tensor)
     }
 
@@ -786,6 +935,65 @@ impl CnnImageClassifier {
         self.forward_with_cache_from_tensor(&input)
     }
 
+    fn forward_with_cache_timed(
+        &self,
+        image_bytes: &[u8],
+    ) -> Result<(Vec<f32>, ForwardCache, CnnForwardStageMetrics), CnnImageClassifierError> {
+        let (in_height, in_width, in_channels) = infer_square_dimensions_and_channels(image_bytes).ok_or(
+            CnnImageClassifierError::UnsupportedImageShape {
+                byte_len: image_bytes.len(),
+            },
+        )?;
+
+        if in_channels != self.input_channels {
+            return Err(CnnImageClassifierError::InputChannelMismatch {
+                expected: self.input_channels,
+                actual: in_channels,
+            });
+        }
+
+        let input = image_bytes_to_tensor_nchw_resized_with_channels(
+            image_bytes,
+            in_height,
+            in_width,
+            in_channels,
+            self.input_height,
+            self.input_width,
+            true,
+        )?;
+
+        self.forward_with_cache_from_tensor_timed(&input)
+    }
+
+    pub fn extract_features_with_dimensions(
+        &self,
+        image_bytes: &[u8],
+        height: usize,
+        width: usize,
+        channels: usize,
+    ) -> Result<Vec<f32>, CnnImageClassifierError> {
+        if channels != self.input_channels {
+            return Err(CnnImageClassifierError::InputChannelMismatch {
+                expected: self.input_channels,
+                actual: channels,
+            });
+        }
+
+        let input = image_bytes_to_tensor_nchw_resized_with_channels(
+            image_bytes,
+            height,
+            width,
+            channels,
+            self.input_height,
+            self.input_width,
+            true,
+        )?;
+        self.forward_feature_stack_no_cache_from_tensor(&input)?
+            .global_average_pool2d()
+            .map(|global| global.first_sample_features())
+            .map_err(CnnImageClassifierError::Tensor)
+    }
+
     fn forward_with_cache_from_tensor(
         &self,
         input: &Tensor4D,
@@ -802,53 +1010,42 @@ impl CnnImageClassifier {
             ));
         }
 
-        #[cfg(feature = "offloading-mlx")]
-        let block1_mlx = if active_backend().name() == "mlx" {
-            self.conv1.mlx_mirror_views()
-        } else {
-            None
-        };
-
-        #[cfg(not(feature = "offloading-mlx"))]
-        let block1_mlx = None;
-
-        let (block1_output, block1_cache) = if let Some((kernels, kernels_shape, bias)) = block1_mlx {
-            forward_conv_block_with_mlx_mirror(input, kernels, kernels_shape, bias)?
-        } else {
-            forward_conv_block(input, self.conv1.kernels(), self.conv1.bias())?
-        };
-
-        #[cfg(feature = "offloading-mlx")]
-        let block2_mlx = if active_backend().name() == "mlx" {
-            self.conv2.as_ref().and_then(|conv2| conv2.mlx_mirror_views())
-        } else {
-            None
-        };
-
-        #[cfg(not(feature = "offloading-mlx"))]
-        let block2_mlx = None;
-
-        let (final_output, block2_cache) = if let Some((kernels, kernels_shape, bias)) = block2_mlx {
-            let (block2_output, block2_cache) =
-                forward_conv_block_with_mlx_mirror(&block1_output, kernels, kernels_shape, bias)?;
-            (block2_output, Some(block2_cache))
-        } else if let Some(conv2) = self.conv2.as_ref() {
-            let (block2_output, block2_cache) =
-                forward_conv_block(&block1_output, conv2.kernels(), conv2.bias())?;
-            (block2_output, Some(block2_cache))
-        } else {
-            (block1_output, None)
-        };
-
+        let (final_output, cache) = self.forward_feature_stack_with_cache_from_tensor(input)?;
         let global = final_output.global_average_pool2d()?;
         let first = global.first_sample_features();
 
         Ok((
             first,
-            ForwardCache {
-                block1: block1_cache,
-                block2: block2_cache,
-            },
+            cache,
+        ))
+    }
+
+    fn forward_with_cache_from_tensor_timed(
+        &self,
+        input: &Tensor4D,
+    ) -> Result<(Vec<f32>, ForwardCache, CnnForwardStageMetrics), CnnImageClassifierError> {
+
+        let (n, c, h, w) = input.shape();
+        if n != 1
+            || c != self.input_channels
+            || h != self.input_height
+            || w != self.input_width
+        {
+            return Err(CnnImageClassifierError::InvalidConfiguration(
+                "forward input tensor shape mismatch",
+            ));
+        }
+
+        let (final_output, cache, mut metrics) = self.forward_feature_stack_with_cache_from_tensor_timed(input)?;
+        let global_start = Instant::now();
+        let global = final_output.global_average_pool2d()?;
+        metrics.global_pool_elapsed_ms = global_start.elapsed().as_secs_f64() * 1000.0;
+        let first = global.first_sample_features();
+
+        Ok((
+            first,
+            cache,
+            metrics,
         ))
     }
 
@@ -867,55 +1064,46 @@ impl CnnImageClassifier {
             ));
         }
 
-        #[cfg(feature = "offloading-mlx")]
-        let block1_mlx = if active_backend().name() == "mlx" {
-            self.conv1.mlx_mirror_views()
-        } else {
-            None
-        };
-
-        #[cfg(not(feature = "offloading-mlx"))]
-        let block1_mlx = None;
-
-        let (block1_output, block1_cache_batch) = if let Some((kernels, kernels_shape, bias)) = block1_mlx {
-            forward_conv_block_with_mlx_mirror(input, kernels, kernels_shape, bias)?
-        } else {
-            forward_conv_block(input, self.conv1.kernels(), self.conv1.bias())?
-        };
-
-        #[cfg(feature = "offloading-mlx")]
-        let block2_mlx = if active_backend().name() == "mlx" {
-            self.conv2.as_ref().and_then(|conv2| conv2.mlx_mirror_views())
-        } else {
-            None
-        };
-
-        #[cfg(not(feature = "offloading-mlx"))]
-        let block2_mlx = None;
-
-        let (final_output, block2_cache_batch) = if let Some((kernels, kernels_shape, bias)) = block2_mlx {
-            let (block2_output, block2_cache) =
-                forward_conv_block_with_mlx_mirror(&block1_output, kernels, kernels_shape, bias)?;
-            (block2_output, Some(block2_cache))
-        } else if let Some(conv2) = self.conv2.as_ref() {
-            let (block2_output, block2_cache) =
-                forward_conv_block(&block1_output, conv2.kernels(), conv2.bias())?;
-            (block2_output, Some(block2_cache))
-        } else {
-            (block1_output, None)
-        };
+        let (final_output, cache) = self.forward_feature_stack_with_cache_from_tensor(input)?;
 
         let global = final_output.global_average_pool2d()?;
         let feature_batch = global.flatten_batch_features();
 
         Ok((
             feature_batch,
-            BatchForwardCache {
-                block1: block1_cache_batch,
-                block2: block2_cache_batch,
-            },
+            BatchForwardCache { blocks: cache.blocks },
         ))
         
+    }
+
+    fn forward_batch_with_cache_from_tensor_timed(
+        &self,
+        input: &Tensor4D,
+    ) -> Result<(Vec<Vec<f32>>, BatchForwardCache, CnnForwardStageMetrics), CnnImageClassifierError> {
+        let (n, c, h, w) = input.shape();
+        if n == 0
+            || c != self.input_channels
+            || h != self.input_height
+            || w != self.input_width
+        {
+            return Err(CnnImageClassifierError::InvalidConfiguration(
+                "forward batch input tensor shape mismatch",
+            ));
+        }
+
+        let (final_output, cache, mut metrics) = self.forward_feature_stack_with_cache_from_tensor_timed(input)?;
+
+        let global_start = Instant::now();
+        let global = final_output.global_average_pool2d()?;
+        metrics.global_pool_elapsed_ms = global_start.elapsed().as_secs_f64() * 1000.0;
+        let feature_batch = global.flatten_batch_features();
+
+        Ok((
+            feature_batch,
+            BatchForwardCache { blocks: cache.blocks },
+            metrics,
+        ))
+
     }
 
     fn forward_batch_features_from_tensor(
@@ -933,61 +1121,145 @@ impl CnnImageClassifier {
             ));
         }
 
-        #[cfg(feature = "offloading-mlx")]
-        let block1_mlx = if active_backend().name() == "mlx" {
-            self.conv1.mlx_mirror_views()
-        } else {
-            None
-        };
-
-        #[cfg(not(feature = "offloading-mlx"))]
-        let block1_mlx = None;
-
-        let block1_output = if let Some((kernels, kernels_shape, bias)) = block1_mlx {
-            forward_conv_block_with_mlx_mirror_no_cache(input, kernels, kernels_shape, bias)?
-        } else {
-            forward_conv_block_no_cache(input, self.conv1.kernels(), self.conv1.bias())?
-        };
-
-        #[cfg(feature = "offloading-mlx")]
-        let block2_mlx = if active_backend().name() == "mlx" {
-            self.conv2.as_ref().and_then(|conv2| conv2.mlx_mirror_views())
-        } else {
-            None
-        };
-
-        #[cfg(not(feature = "offloading-mlx"))]
-        let block2_mlx = None;
-
-        let final_output = if let Some((kernels, kernels_shape, bias)) = block2_mlx {
-            forward_conv_block_with_mlx_mirror_no_cache(&block1_output, kernels, kernels_shape, bias)?
-        } else if let Some(conv2) = self.conv2.as_ref() {
-            forward_conv_block_no_cache(&block1_output, conv2.kernels(), conv2.bias())?
-        } else {
-            block1_output
-        };
+        let final_output = self.forward_feature_stack_no_cache_from_tensor(input)?;
 
         let global = final_output.global_average_pool2d()?;
         Ok(global.flatten_batch_features())
     }
 
     pub fn train_image(&mut self, label: &str, image_bytes: &[u8]) -> Result<f32, CnnImageClassifierError> {
+        self
+            .train_image_timed(label, image_bytes)
+            .map(|(loss, _timing)| loss)
 
+    }
+
+    pub fn train_image_timed(
+        &mut self,
+        label: &str,
+        image_bytes: &[u8],
+    ) -> Result<(f32, CnnTrainTimingReport), CnnImageClassifierError> {
+        let total_start = Instant::now();
         let normalized = label.trim().to_ascii_lowercase();
         let class_index = match self.label_to_index.get(&normalized).copied() {
             Some(index) => index,
             None => return Err(CnnImageClassifierError::UnknownLabel(normalized)),
         };
 
-        let (features, cache) = self.forward_with_cache(image_bytes)?;
+        let feature_start = Instant::now();
+        let (features, cache, forward_stage_metrics) = self.forward_with_cache_timed(image_bytes)?;
+        let feature_elapsed_ms = feature_start.elapsed().as_secs_f64() * 1000.0;
+
+        let head_start = Instant::now();
         let (loss, feature_grad) = self
             .head
             .train_step_with_input_gradient(features.as_slice(), class_index)?;
+        let head_elapsed_ms = head_start.elapsed().as_secs_f64() * 1000.0;
 
-        self.backward_feature_extractor(&cache, feature_grad.as_slice())?;
-        
-        Ok(loss)
+        let backprop_start = Instant::now();
+        let backprop_stage_metrics = self.backward_feature_extractor_with_scale_timed(
+            &cache,
+            feature_grad.as_slice(),
+            1.0,
+        )?;
+        let backprop_elapsed_ms = backprop_start.elapsed().as_secs_f64() * 1000.0;
 
+        let total_elapsed_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+
+        Ok((
+            loss,
+            CnnTrainTimingReport {
+                input_elapsed_ms: 0.0,
+                feature_elapsed_ms,
+                head_elapsed_ms,
+                backprop_elapsed_ms,
+                total_elapsed_ms,
+                forward_stage_metrics,
+                backprop_stage_metrics,
+            },
+        ))
+
+    }
+
+    pub fn train_image_with_dimensions(
+        &mut self,
+        label: &str,
+        image_bytes: &[u8],
+        height: usize,
+        width: usize,
+        channels: usize,
+    ) -> Result<f32, CnnImageClassifierError> {
+        self
+            .train_image_with_dimensions_timed(label, image_bytes, height, width, channels)
+            .map(|(loss, _timing)| loss)
+    }
+
+    pub fn train_image_with_dimensions_timed(
+        &mut self,
+        label: &str,
+        image_bytes: &[u8],
+        height: usize,
+        width: usize,
+        channels: usize,
+    ) -> Result<(f32, CnnTrainTimingReport), CnnImageClassifierError> {
+        let total_start = Instant::now();
+        let normalized = label.trim().to_ascii_lowercase();
+        let class_index = match self.label_to_index.get(&normalized).copied() {
+            Some(index) => index,
+            None => return Err(CnnImageClassifierError::UnknownLabel(normalized)),
+        };
+
+        if channels != self.input_channels {
+            return Err(CnnImageClassifierError::InputChannelMismatch {
+                expected: self.input_channels,
+                actual: channels,
+            });
+        }
+
+        let input_start = Instant::now();
+        let input = image_bytes_to_tensor_nchw_resized_with_channels(
+            image_bytes,
+            height,
+            width,
+            channels,
+            self.input_height,
+            self.input_width,
+            true,
+        )?;
+        let input_elapsed_ms = input_start.elapsed().as_secs_f64() * 1000.0;
+
+        let feature_start = Instant::now();
+        let (features, cache, forward_stage_metrics) = self.forward_with_cache_from_tensor_timed(&input)?;
+        let feature_elapsed_ms = feature_start.elapsed().as_secs_f64() * 1000.0;
+
+        let head_start = Instant::now();
+        let (loss, feature_grad) = self
+            .head
+            .train_step_with_input_gradient(features.as_slice(), class_index)?;
+        let head_elapsed_ms = head_start.elapsed().as_secs_f64() * 1000.0;
+
+        let backprop_start = Instant::now();
+        let backprop_stage_metrics = self.backward_feature_extractor_with_scale_timed(
+            &cache,
+            feature_grad.as_slice(),
+            1.0,
+        )?;
+        let backprop_elapsed_ms = backprop_start.elapsed().as_secs_f64() * 1000.0;
+
+        let total_elapsed_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+
+        Ok((
+            loss,
+            CnnTrainTimingReport {
+                input_elapsed_ms,
+                feature_elapsed_ms,
+                head_elapsed_ms,
+                backprop_elapsed_ms,
+                total_elapsed_ms,
+                forward_stage_metrics,
+                backprop_stage_metrics,
+            },
+        ))
     }
 
     pub fn train_image_batch(
@@ -995,6 +1267,18 @@ impl CnnImageClassifier {
         label: &str,
         images: &[Vec<u8>],
     ) -> Result<f32, CnnImageClassifierError> {
+        self
+            .train_image_batch_timed(label, images)
+            .map(|(loss, _timing)| loss)
+
+    }
+
+    pub fn train_image_batch_timed(
+        &mut self,
+        label: &str,
+        images: &[Vec<u8>],
+    ) -> Result<(f32, CnnTrainTimingReport), CnnImageClassifierError> {
+        let total_start = Instant::now();
 
         if images.is_empty() {
             return Err(CnnImageClassifierError::InvalidConfiguration(
@@ -1011,6 +1295,8 @@ impl CnnImageClassifier {
         let mut feature_batch: Vec<Vec<f32>> = Vec::with_capacity(images.len());
         let mut caches: Vec<ForwardCache> = Vec::with_capacity(images.len());
         let mut batch_cache: Option<BatchForwardCache> = None;
+        let mut forward_stage_metrics = CnnForwardStageMetrics::default();
+        let mut backprop_stage_metrics = CnnBackpropStageMetrics::default();
 
         let common_shape = images
             .first()
@@ -1028,8 +1314,11 @@ impl CnnImageClassifier {
                 }
             });
 
+        let mut input_elapsed_ms = 0.0f64;
+        let feature_start = Instant::now();
         if cnn_batch_preprocess_enabled() {
             if let Some((in_h, in_w, in_c)) = common_shape {
+                let input_start = Instant::now();
                 let batch_inputs = image_batch_to_tensor_nchw_resized_with_channels(
                     images,
                     in_h,
@@ -1039,218 +1328,191 @@ impl CnnImageClassifier {
                     self.input_width,
                     true,
                 )?;
+                input_elapsed_ms += input_start.elapsed().as_secs_f64() * 1000.0;
 
-                let (features, cache_item) = self.forward_batch_with_cache_from_tensor(&batch_inputs)?;
+                let (features, cache_item, metrics) = self.forward_batch_with_cache_from_tensor_timed(&batch_inputs)?;
                 feature_batch = features;
                 batch_cache = Some(cache_item);
+                forward_stage_metrics.conv_elapsed_ms += metrics.conv_elapsed_ms;
+                forward_stage_metrics.pool_elapsed_ms += metrics.pool_elapsed_ms;
+                forward_stage_metrics.global_pool_elapsed_ms += metrics.global_pool_elapsed_ms;
             } else {
                 for image in images {
-                    let (features, cache) = self.forward_with_cache(image.as_slice())?;
+                    let (features, cache, metrics) = self.forward_with_cache_timed(image.as_slice())?;
                     feature_batch.push(features);
                     caches.push(cache);
+                    forward_stage_metrics.conv_elapsed_ms += metrics.conv_elapsed_ms;
+                    forward_stage_metrics.pool_elapsed_ms += metrics.pool_elapsed_ms;
+                    forward_stage_metrics.global_pool_elapsed_ms += metrics.global_pool_elapsed_ms;
                 }
             }
         } else {
             for image in images {
-                let (features, cache) = self.forward_with_cache(image.as_slice())?;
+                let (features, cache, metrics) = self.forward_with_cache_timed(image.as_slice())?;
                 feature_batch.push(features);
                 caches.push(cache);
+                forward_stage_metrics.conv_elapsed_ms += metrics.conv_elapsed_ms;
+                forward_stage_metrics.pool_elapsed_ms += metrics.pool_elapsed_ms;
+                forward_stage_metrics.global_pool_elapsed_ms += metrics.global_pool_elapsed_ms;
             }
         }
+        let feature_elapsed_ms = feature_start.elapsed().as_secs_f64() * 1000.0;
 
+        let head_start = Instant::now();
         let targets = vec![class_index; images.len()];
         let (loss, feature_grads) = self
             .head
             .train_batch_with_input_gradients(feature_batch.as_slice(), targets.as_slice())?;
+        let head_elapsed_ms = head_start.elapsed().as_secs_f64() * 1000.0;
 
         let batch_size = images.len() as f32;
 
-        // Reset cached accumulator buffers — fill(0.0) on hot memory is faster
-        // than allocating fresh zeros from the heap on every training call.
-        self.conv1.reset_accumulated_gradients();
+        for block in &mut self.feature_blocks {
+            block.reset_accumulated_gradients();
+        }
 
-        if let Some(batch_cache) = batch_cache {
-            if self.conv2.is_some() {
-                let block2_cache = batch_cache.block2.as_ref().ok_or(
-                    CnnImageClassifierError::InvalidConfiguration(
-                        "second convolution block cache missing during batch backprop",
-                    ),
-                )?;
-
-                let block2_pooled_grad = pooled_grad_batch_from_feature_gradients(
-                    block2_cache.pooled_shape,
-                    feature_grads.as_slice(),
-                )?;
-
-                let block2_backward = backward_conv_block_gradients(
-                    self.conv2.as_ref().ok_or(
-                        CnnImageClassifierError::InvalidConfiguration(
-                            "second convolution block is missing kernel parameters",
-                        ),
-                    )?.kernels(),
-                    block2_cache,
-                    &block2_pooled_grad,
-                    true,
-                )?;
-
-                self.conv2
-                    .as_mut()
-                    .ok_or(CnnImageClassifierError::InvalidConfiguration(
-                        "second convolution block gradient accumulator is missing",
-                    ))?
-                    .accumulate_gradients(&block2_backward.kernel_grad, block2_backward.bias_grad.as_slice())?;
-
-                let block2_input_grad = block2_backward.input_grad.as_ref().ok_or(
-                    CnnImageClassifierError::InvalidConfiguration(
-                        "second convolution block gradient is missing pooled input gradient",
-                    ),
-                )?;
-
-                if block2_input_grad.shape() != batch_cache.block1.pooled_shape {
-                    return Err(CnnImageClassifierError::GradientTensorShapeMismatch {
-                        expected: batch_cache.block1.pooled_shape,
-                        actual: block2_input_grad.shape(),
-                    });
-                }
-
-                let block1_backward = backward_conv_block_gradients(
-                    self.conv1.kernels(),
-                    &batch_cache.block1,
-                    block2_input_grad,
-                    false,
-                )?;
-
-                self.conv1.accumulate_gradients(
-                    &block1_backward.kernel_grad,
-                    block1_backward.bias_grad.as_slice(),
-                )?;
-
-                let conv2 = self.conv2.as_mut().ok_or(
-                    CnnImageClassifierError::InvalidConfiguration(
-                        "second convolution block gradient accumulator is missing",
-                    ),
-                )?;
-                conv2.apply_sgd_update(self.feature_learning_rate, batch_size)?;
-            } else {
-                let block1_pooled_grad = pooled_grad_batch_from_feature_gradients(
-                    batch_cache.block1.pooled_shape,
-                    feature_grads.as_slice(),
-                )?;
-
-                let block1_backward = backward_conv_block_gradients(
-                    self.conv1.kernels(),
-                    &batch_cache.block1,
-                    &block1_pooled_grad,
-                    false,
-                )?;
-
-                self.conv1.accumulate_gradients(
-                    &block1_backward.kernel_grad,
-                    block1_backward.bias_grad.as_slice(),
-                )?;
-            }
-        } else if self.conv2.is_some() {
-            self.conv2
-                .as_mut()
-                .ok_or(CnnImageClassifierError::InvalidConfiguration(
-                    "second convolution block gradient accumulator is missing",
-                ))?
-                .reset_accumulated_gradients();
-
-            for (cache, feature_grad) in caches.iter().zip(feature_grads.iter()) {
-
-                let block2_cache = cache.block2.as_ref().ok_or(
-                    CnnImageClassifierError::InvalidConfiguration(
-                        "second convolution block cache missing during batch backprop",
-                    ),
-                )?;
-
-                let block2_pooled_grad = pooled_grad_from_feature_gradient(
-                    block2_cache.pooled_shape,
-                    feature_grad.as_slice(),
-                )?;
-
-                let block2_backward = backward_conv_block_gradients(
-                    self.conv2.as_ref().ok_or(
-                        CnnImageClassifierError::InvalidConfiguration(
-                            "second convolution block is missing kernel parameters",
-                        ),
-                    )?.kernels(),
-                    block2_cache,
-                    &block2_pooled_grad,
-                    true,
-                )?;
-
-                self.conv2
-                    .as_mut()
-                    .ok_or(CnnImageClassifierError::InvalidConfiguration(
-                        "second convolution block gradient accumulator is missing",
-                    ))?
-                    .accumulate_gradients(&block2_backward.kernel_grad, block2_backward.bias_grad.as_slice())?;
-
-                let block2_input_grad = block2_backward.input_grad.as_ref().ok_or(
-                    CnnImageClassifierError::InvalidConfiguration(
-                        "second convolution block gradient is missing pooled input gradient",
-                    ),
-                )?;
-
-                if block2_input_grad.shape() != cache.block1.pooled_shape {
-                    return Err(CnnImageClassifierError::GradientTensorShapeMismatch {
-                        expected: cache.block1.pooled_shape,
-                        actual: block2_input_grad.shape(),
-                    });
-                }
-
-                let block1_backward = backward_conv_block_gradients(
-                    self.conv1.kernels(),
-                    &cache.block1,
-                    block2_input_grad,
-                    false,
-                )?;
-
-                self.conv1.accumulate_gradients(
-                    &block1_backward.kernel_grad,
-                    block1_backward.bias_grad.as_slice(),
-                )?;
-
-            }
-
-            let conv2 = self.conv2.as_mut().ok_or(
-                CnnImageClassifierError::InvalidConfiguration(
-                    "second convolution block gradient accumulator is missing",
-                ),
+        let backprop_start = Instant::now();
+        if let Some(batch_cache) = batch_cache.as_ref() {
+            let metrics = self.backward_feature_extractor_batch_with_scale_timed(
+                batch_cache,
+                feature_grads.as_slice(),
+                batch_size,
+                1.0,
             )?;
-            conv2.apply_sgd_update(self.feature_learning_rate, batch_size)?;
+            backprop_stage_metrics.pooled_grad_elapsed_ms += metrics.pooled_grad_elapsed_ms;
+            backprop_stage_metrics.gradients_elapsed_ms += metrics.gradients_elapsed_ms;
+            backprop_stage_metrics.apply_update_elapsed_ms += metrics.apply_update_elapsed_ms;
+            backprop_stage_metrics.input_grad_transfer_elapsed_ms += metrics.input_grad_transfer_elapsed_ms;
+            backprop_stage_metrics.unpool_relu_elapsed_ms += metrics.unpool_relu_elapsed_ms;
+            backprop_stage_metrics.dw_elapsed_ms += metrics.dw_elapsed_ms;
+            backprop_stage_metrics.dinput_elapsed_ms += metrics.dinput_elapsed_ms;
+            backprop_stage_metrics.bias_grad_elapsed_ms += metrics.bias_grad_elapsed_ms;
         } else {
             for (cache, feature_grad) in caches.iter().zip(feature_grads.iter()) {
-                let block1_pooled_grad = pooled_grad_from_feature_gradient(
-                    cache.block1.pooled_shape,
+                let metrics = self.backward_feature_extractor_with_scale_timed(
+                    cache,
                     feature_grad.as_slice(),
+                    1.0 / batch_size,
                 )?;
-
-                let block1_backward = backward_conv_block_gradients(
-                    self.conv1.kernels(),
-                    &cache.block1,
-                    &block1_pooled_grad,
-                    false,
-                )?;
-
-                self.conv1.accumulate_gradients(
-                    &block1_backward.kernel_grad,
-                    block1_backward.bias_grad.as_slice(),
-                )?;
+                backprop_stage_metrics.pooled_grad_elapsed_ms += metrics.pooled_grad_elapsed_ms;
+                backprop_stage_metrics.gradients_elapsed_ms += metrics.gradients_elapsed_ms;
+                backprop_stage_metrics.apply_update_elapsed_ms += metrics.apply_update_elapsed_ms;
+                backprop_stage_metrics.input_grad_transfer_elapsed_ms += metrics.input_grad_transfer_elapsed_ms;
+                backprop_stage_metrics.unpool_relu_elapsed_ms += metrics.unpool_relu_elapsed_ms;
+                backprop_stage_metrics.dw_elapsed_ms += metrics.dw_elapsed_ms;
+                backprop_stage_metrics.dinput_elapsed_ms += metrics.dinput_elapsed_ms;
+                backprop_stage_metrics.bias_grad_elapsed_ms += metrics.bias_grad_elapsed_ms;
             }
         }
+        let backprop_elapsed_ms = backprop_start.elapsed().as_secs_f64() * 1000.0;
 
-        self.conv1.apply_sgd_update(self.feature_learning_rate, batch_size)?;
+        let total_elapsed_ms = total_start.elapsed().as_secs_f64() * 1000.0;
 
-        self.conv1.sync_backend_mirror();
-        if let Some(conv2) = self.conv2.as_mut() {
-            conv2.sync_backend_mirror();
+        Ok((
+            loss,
+            CnnTrainTimingReport {
+                input_elapsed_ms,
+                feature_elapsed_ms,
+                head_elapsed_ms,
+                backprop_elapsed_ms,
+                total_elapsed_ms,
+                forward_stage_metrics,
+                backprop_stage_metrics,
+            },
+        ))
+
+    }
+
+    pub fn train_image_batch_with_dimensions(
+        &mut self,
+        label: &str,
+        images: &[Vec<u8>],
+        shape: ImageTensorShape,
+    ) -> Result<f32, CnnImageClassifierError> {
+        self
+            .train_image_batch_with_dimensions_timed(label, images, shape)
+            .map(|(loss, _timing)| loss)
+    }
+
+    pub fn train_image_batch_with_dimensions_timed(
+        &mut self,
+        label: &str,
+        images: &[Vec<u8>],
+        shape: ImageTensorShape,
+    ) -> Result<(f32, CnnTrainTimingReport), CnnImageClassifierError> {
+        let total_start = Instant::now();
+
+        if images.is_empty() {
+            return Err(CnnImageClassifierError::InvalidConfiguration(
+                "cannot train on an empty image batch",
+            ));
         }
 
-        Ok(loss)
+        let normalized = label.trim().to_ascii_lowercase();
+        let class_index = match self.label_to_index.get(&normalized).copied() {
+            Some(index) => index,
+            None => return Err(CnnImageClassifierError::UnknownLabel(normalized)),
+        };
 
+        if shape.channels != self.input_channels {
+            return Err(CnnImageClassifierError::InputChannelMismatch {
+                expected: self.input_channels,
+                actual: shape.channels,
+            });
+        }
+
+        let input_start = Instant::now();
+        let batch_inputs = image_batch_to_tensor_nchw_resized_with_channels(
+            images,
+            shape.height,
+            shape.width,
+            shape.channels,
+            self.input_height,
+            self.input_width,
+            true,
+        )?;
+        let input_elapsed_ms = input_start.elapsed().as_secs_f64() * 1000.0;
+
+        let feature_start = Instant::now();
+        let (feature_batch, batch_cache, forward_stage_metrics) = self.forward_batch_with_cache_from_tensor_timed(&batch_inputs)?;
+        let feature_elapsed_ms = feature_start.elapsed().as_secs_f64() * 1000.0;
+
+        let head_start = Instant::now();
+        let targets = vec![class_index; images.len()];
+        let (loss, feature_grads) = self
+            .head
+            .train_batch_with_input_gradients(feature_batch.as_slice(), targets.as_slice())?;
+        let head_elapsed_ms = head_start.elapsed().as_secs_f64() * 1000.0;
+
+        let batch_size = images.len() as f32;
+
+        for block in &mut self.feature_blocks {
+            block.reset_accumulated_gradients();
+        }
+
+        let backprop_start = Instant::now();
+        let backprop_stage_metrics = self.backward_feature_extractor_batch_with_scale_timed(
+            &batch_cache,
+            feature_grads.as_slice(),
+            batch_size,
+            1.0,
+        )?;
+        let backprop_elapsed_ms = backprop_start.elapsed().as_secs_f64() * 1000.0;
+
+        let total_elapsed_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+
+        Ok((
+            loss,
+            CnnTrainTimingReport {
+                input_elapsed_ms,
+                feature_elapsed_ms,
+                head_elapsed_ms,
+                backprop_elapsed_ms,
+                total_elapsed_ms,
+                forward_stage_metrics,
+                backprop_stage_metrics,
+            },
+        ))
     }
 
     pub fn predict_with_confidence(
@@ -1258,6 +1520,17 @@ impl CnnImageClassifier {
         image_bytes: &[u8],
     ) -> Result<Option<(String, f32)>, CnnImageClassifierError> {
         let features = self.extract_features(image_bytes)?;
+        self.classify_feature_vector(features.as_slice())
+    }
+
+    pub fn predict_with_confidence_with_dimensions(
+        &self,
+        image_bytes: &[u8],
+        height: usize,
+        width: usize,
+        channels: usize,
+    ) -> Result<Option<(String, f32)>, CnnImageClassifierError> {
+        let features = self.extract_features_with_dimensions(image_bytes, height, width, channels)?;
         self.classify_feature_vector(features.as_slice())
     }
 
@@ -1358,6 +1631,104 @@ impl CnnImageClassifier {
         })
     }
 
+    pub fn predict_batch_with_confidence_report_with_dimensions(
+        &self,
+        images: &[Vec<u8>],
+        height: usize,
+        width: usize,
+        channels: usize,
+        options: CnnBatchPredictOptions,
+    ) -> Result<CnnBatchPredictReport, CnnImageClassifierError> {
+        if images.is_empty() {
+            return Ok(CnnBatchPredictReport {
+                predictions: Vec::new(),
+                total_images: 0,
+                micro_batch_count: 0,
+                max_micro_batch_size: options.max_micro_batch_size.max(1),
+                preprocessing_elapsed_ms: 0.0,
+                model_elapsed_ms: 0.0,
+                total_elapsed_ms: 0.0,
+                throughput_images_per_sec: 0.0,
+            });
+        }
+
+        if channels != self.input_channels {
+            return Err(CnnImageClassifierError::InputChannelMismatch {
+                expected: self.input_channels,
+                actual: channels,
+            });
+        }
+
+        let total_start = Instant::now();
+        let max_micro_batch_size = options.max_micro_batch_size.max(1);
+        let mut predictions = Vec::with_capacity(images.len());
+        let mut preprocess_elapsed_sec = 0.0f64;
+        let mut model_elapsed_sec = 0.0f64;
+        let mut micro_batch_count = 0usize;
+
+        for chunk in images.chunks(max_micro_batch_size) {
+            micro_batch_count += 1;
+
+            if options.enable_batch_preprocess {
+                let preprocess_start = Instant::now();
+                let batch_inputs = image_batch_to_tensor_nchw_resized_with_channels(
+                    chunk,
+                    height,
+                    width,
+                    channels,
+                    self.input_height,
+                    self.input_width,
+                    true,
+                )?;
+                preprocess_elapsed_sec += preprocess_start.elapsed().as_secs_f64();
+
+                let model_start = Instant::now();
+                let feature_batch = self.forward_batch_features_from_tensor(&batch_inputs)?;
+                for features in feature_batch {
+                    predictions.push(self.classify_feature_vector(features.as_slice())?);
+                }
+                model_elapsed_sec += model_start.elapsed().as_secs_f64();
+                continue;
+            }
+
+            for image in chunk {
+                let model_start = Instant::now();
+                let features = self.extract_features_with_dimensions(image.as_slice(), height, width, channels)?;
+                predictions.push(self.classify_feature_vector(features.as_slice())?);
+                model_elapsed_sec += model_start.elapsed().as_secs_f64();
+            }
+        }
+
+        let total_elapsed_sec = total_start.elapsed().as_secs_f64();
+        Ok(CnnBatchPredictReport {
+            predictions,
+            total_images: images.len(),
+            micro_batch_count,
+            max_micro_batch_size,
+            preprocessing_elapsed_ms: preprocess_elapsed_sec * 1_000.0,
+            model_elapsed_ms: model_elapsed_sec * 1_000.0,
+            total_elapsed_ms: total_elapsed_sec * 1_000.0,
+            throughput_images_per_sec: images.len() as f64 / total_elapsed_sec.max(1e-9),
+        })
+    }
+
+    pub fn predict_batch_with_confidence_with_dimensions(
+        &self,
+        images: &[Vec<u8>],
+        height: usize,
+        width: usize,
+        channels: usize,
+    ) -> Result<Vec<Option<(String, f32)>>, CnnImageClassifierError> {
+        let report = self.predict_batch_with_confidence_report_with_dimensions(
+            images,
+            height,
+            width,
+            channels,
+            CnnBatchPredictOptions::default(),
+        )?;
+        Ok(report.predictions)
+    }
+
     fn classify_feature_vector(
         &self,
         features: &[f32],
@@ -1390,11 +1761,9 @@ impl CnnImageClassifier {
 
     pub fn save_to_file(&self, path: &Path) -> io::Result<()> {
 
-        let mut conv1 = self.conv1.clone();
-        conv1.refresh_host_from_backend();
-        let mut conv2 = self.conv2.clone();
-        if let Some(state) = conv2.as_mut() {
-            state.refresh_host_from_backend();
+        let mut feature_blocks = self.feature_blocks.clone();
+        for block in feature_blocks.iter_mut() {
+            block.refresh_host_from_backend();
         }
 
         if let Some(parent) = path.parent()
@@ -1409,10 +1778,8 @@ impl CnnImageClassifier {
             input_channels: self.input_channels,
             class_labels: self.class_labels.clone(),
             label_to_index: self.label_to_index.clone(),
-            conv1_kernels: conv1.snapshot().0,
-            conv1_bias: conv1.snapshot().1,
-            conv2_kernels: conv2.as_ref().map(|state| state.snapshot().0),
-            conv2_bias: conv2.as_ref().map(|state| state.snapshot().1),
+            feature_block_kernels: feature_blocks.iter().map(|state| state.snapshot().0).collect(),
+            feature_block_biases: feature_blocks.iter().map(|state| state.snapshot().1).collect(),
             feature_learning_rate: self.feature_learning_rate,
             head: self.head.clone(),
             min_confidence: self.min_confidence,
@@ -1501,43 +1868,49 @@ impl CnnImageClassifier {
             ));
         }
 
-        if snapshot.conv1_kernels.shape().0 != snapshot.conv1_bias.len() {
+        if snapshot.feature_block_kernels.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "invalid CNN classifier snapshot '{}' (conv1 channels and bias mismatch)",
+                    "invalid CNN classifier snapshot '{}' (feature block stack is empty)",
                     path.display()
                 ),
             ));
         }
 
-        if snapshot.conv1_kernels.shape().1 != snapshot.input_channels {
+        if snapshot.feature_block_kernels.len() != snapshot.feature_block_biases.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "invalid CNN classifier snapshot '{}' (conv1 kernel input channels and model input channels mismatch)",
+                    "invalid CNN classifier snapshot '{}' (feature block kernels/biases length mismatch)",
                     path.display()
                 ),
             ));
         }
 
-        if (snapshot.conv2_kernels.is_some()) != (snapshot.conv2_bias.is_some()) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "invalid CNN classifier snapshot '{}' (conv2 kernels/bias must both be present or absent)",
-                    path.display()
-                ),
-            ));
-        }
-
-        if let (Some(conv2_kernels), Some(conv2_bias)) = (&snapshot.conv2_kernels, &snapshot.conv2_bias)
-            && conv2_kernels.shape().0 != conv2_bias.len()
+        for (index, (kernels, bias)) in snapshot
+            .feature_block_kernels
+            .iter()
+            .zip(snapshot.feature_block_biases.iter())
+            .enumerate()
         {
+            if kernels.shape().0 != bias.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "invalid CNN classifier snapshot '{}' (feature block {} channels and bias mismatch)",
+                        path.display(),
+                        index,
+                    ),
+                ));
+            }
+        }
+
+        if snapshot.feature_block_kernels[0].shape().1 != snapshot.input_channels {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "invalid CNN classifier snapshot '{}' (conv2 channels and bias mismatch)",
+                    "invalid CNN classifier snapshot '{}' (first feature block input channels and model input channels mismatch)",
                     path.display()
                 ),
             ));
@@ -1545,10 +1918,10 @@ impl CnnImageClassifier {
 
         let (head_input_dim, head_output_dim) = snapshot.head.dimensions();
         let feature_dim = snapshot
-            .conv2_kernels
-            .as_ref()
+            .feature_block_kernels
+            .last()
             .map(|kernels| kernels.shape().0)
-            .unwrap_or_else(|| snapshot.conv1_kernels.shape().0);
+            .unwrap_or(0);
 
         if head_input_dim != feature_dim || head_output_dim != snapshot.class_labels.len() {
             return Err(io::Error::new(
@@ -1566,11 +1939,12 @@ impl CnnImageClassifier {
             input_channels: snapshot.input_channels,
             class_labels: snapshot.class_labels,
             label_to_index: snapshot.label_to_index,
-            conv1: ConvParameterState::new(snapshot.conv1_kernels, snapshot.conv1_bias),
-            conv2: match (snapshot.conv2_kernels, snapshot.conv2_bias) {
-                (Some(kernels), Some(bias)) => Some(ConvParameterState::new(kernels, bias)),
-                _ => None,
-            },
+            feature_blocks: snapshot
+                .feature_block_kernels
+                .into_iter()
+                .zip(snapshot.feature_block_biases)
+                .map(|(kernels, bias)| ConvParameterState::new(kernels, bias))
+                .collect(),
             feature_learning_rate: snapshot.feature_learning_rate,
             head: snapshot.head,
             min_confidence: snapshot.min_confidence,
@@ -1583,7 +1957,9 @@ impl CnnImageClassifier {
         cache: &ForwardCache,
         feature_grad: &[f32],
     ) -> Result<(), CnnImageClassifierError> {
-        self.backward_feature_extractor_with_scale(cache, feature_grad, 1.0)
+        self
+            .backward_feature_extractor_with_scale_timed(cache, feature_grad, 1.0)
+            .map(|_metrics| ())
     }
 
     fn backward_feature_extractor_with_scale(
@@ -1592,67 +1968,185 @@ impl CnnImageClassifier {
         feature_grad: &[f32],
         grad_scale: f32,
     ) -> Result<(), CnnImageClassifierError> {
+        self
+            .backward_feature_extractor_with_scale_timed(cache, feature_grad, grad_scale)
+            .map(|_metrics| ())
+    }
 
-        let effective_learning_rate = self.feature_learning_rate * grad_scale.max(0.0);
+    fn backward_feature_extractor_with_scale_timed(
+        &mut self,
+        cache: &ForwardCache,
+        feature_grad: &[f32],
+        grad_scale: f32,
+    ) -> Result<CnnBackpropStageMetrics, CnnImageClassifierError> {
 
-        if let Some(block2_cache) = cache.block2.as_ref() {
-            let block2_pooled_grad = pooled_grad_from_feature_gradient(
-                block2_cache.pooled_shape,
-                feature_grad,
-            )?;
-
-            let conv2 = self.conv2.as_mut().ok_or(
-                CnnImageClassifierError::InvalidConfiguration(
-                    "second convolution block is missing parameters",
-                ),
-            )?;
-            let (conv2_kernels, conv2_bias) = conv2.parameter_views_mut();
-
-            let grad_to_block1_pooled = backward_conv_block(
-                conv2_kernels,
-                conv2_bias,
-                block2_cache,
-                &block2_pooled_grad,
-                effective_learning_rate,
-                true,
-            )?;
-
-            if grad_to_block1_pooled.shape() != cache.block1.pooled_shape {
-                return Err(CnnImageClassifierError::GradientTensorShapeMismatch {
-                    expected: cache.block1.pooled_shape,
-                    actual: grad_to_block1_pooled.shape(),
-                });
-            }
-
-            let (conv1_kernels, conv1_bias) = self.conv1.parameter_views_mut();
-            let _ = backward_conv_block(
-                conv1_kernels,
-                conv1_bias,
-                &cache.block1,
-                &grad_to_block1_pooled,
-                effective_learning_rate,
-                false,
-            )?;
-
-            conv2.sync_backend_mirror();
-            self.conv1.sync_backend_mirror();
-
-            return Ok(());
+        if cache.blocks.is_empty() {
+            return Err(CnnImageClassifierError::InvalidConfiguration(
+                "feature block cache stack is empty",
+            ));
         }
 
-        let block1_pooled_grad =
-            pooled_grad_from_feature_gradient(cache.block1.pooled_shape, feature_grad)?;
-        let (conv1_kernels, conv1_bias) = self.conv1.parameter_views_mut();
-        let _ = backward_conv_block(
-            conv1_kernels,
-            conv1_bias,
-            &cache.block1,
-            &block1_pooled_grad,
-            effective_learning_rate,
-            false,
+        let mut metrics = CnnBackpropStageMetrics::default();
+
+        let effective_learning_rate = self.feature_learning_rate * grad_scale.max(0.0);
+        let pooled_grad_start = Instant::now();
+        let mut pooled_grad = pooled_grad_from_feature_gradient(
+            cache.blocks.last().unwrap().pooled_shape,
+            feature_grad,
         )?;
-        self.conv1.sync_backend_mirror();
-        Ok(())
+        metrics.pooled_grad_elapsed_ms = pooled_grad_start.elapsed().as_secs_f64() * 1000.0;
+
+        for block_index in (0..self.feature_blocks.len()).rev() {
+            let block_cache = cache.blocks.get(block_index).ok_or(
+                CnnImageClassifierError::InvalidConfiguration(
+                    "feature block cache missing during backprop",
+                ),
+            )?;
+            let compute_input_grad = block_index > 0;
+            let block = self.feature_blocks.get_mut(block_index).ok_or(
+                CnnImageClassifierError::InvalidConfiguration(
+                    "feature block parameters missing during backprop",
+                ),
+            )?;
+            let (kernels, bias) = block.parameter_views_mut();
+            let grad_start = Instant::now();
+            let backward = backward_conv_block_gradients(
+                kernels,
+                block_cache,
+                &pooled_grad,
+                compute_input_grad,
+            )?;
+            metrics.gradients_elapsed_ms += grad_start.elapsed().as_secs_f64() * 1000.0;
+
+            let update_start = Instant::now();
+            apply_conv_gradients_single(
+                kernels,
+                bias,
+                &backward.kernel_grad,
+                backward.bias_grad.as_slice(),
+                effective_learning_rate,
+                1.0,
+            )?;
+            metrics.apply_update_elapsed_ms += update_start.elapsed().as_secs_f64() * 1000.0;
+
+            if compute_input_grad {
+                let transfer_start = Instant::now();
+                let next_grad = backward.input_grad.as_ref().ok_or(
+                    CnnImageClassifierError::InvalidConfiguration(
+                        "feature block gradient is missing pooled input gradient",
+                    ),
+                )?;
+                let expected_shape = cache.blocks[block_index - 1].pooled_shape;
+                if next_grad.shape() != expected_shape {
+                    return Err(CnnImageClassifierError::GradientTensorShapeMismatch {
+                        expected: expected_shape,
+                        actual: next_grad.shape(),
+                    });
+                }
+                pooled_grad = next_grad.clone();
+                metrics.input_grad_transfer_elapsed_ms +=
+                    transfer_start.elapsed().as_secs_f64() * 1000.0;
+            }
+        }
+
+        self.sync_feature_blocks_backend_mirror();
+        Ok(metrics)
+
+    }
+
+    fn backward_feature_extractor_batch_with_scale(
+        &mut self,
+        cache: &BatchForwardCache,
+        feature_grads: &[Vec<f32>],
+        batch_size: f32,
+        grad_scale: f32,
+    ) -> Result<(), CnnImageClassifierError> {
+        self
+            .backward_feature_extractor_batch_with_scale_timed(cache, feature_grads, batch_size, grad_scale)
+            .map(|_metrics| ())
+    }
+
+    fn backward_feature_extractor_batch_with_scale_timed(
+        &mut self,
+        cache: &BatchForwardCache,
+        feature_grads: &[Vec<f32>],
+        batch_size: f32,
+        grad_scale: f32,
+    ) -> Result<CnnBackpropStageMetrics, CnnImageClassifierError> {
+
+        if cache.blocks.is_empty() {
+            return Err(CnnImageClassifierError::InvalidConfiguration(
+                "feature block cache stack is empty",
+            ));
+        }
+
+        let mut metrics = CnnBackpropStageMetrics::default();
+
+        let effective_learning_rate = self.feature_learning_rate * grad_scale.max(0.0);
+        let pooled_grad_start = Instant::now();
+        let mut pooled_grad = pooled_grad_batch_from_feature_gradients(
+            cache.blocks.last().unwrap().pooled_shape,
+            feature_grads,
+        )?;
+        metrics.pooled_grad_elapsed_ms = pooled_grad_start.elapsed().as_secs_f64() * 1000.0;
+
+        for block_index in (0..self.feature_blocks.len()).rev() {
+            let block_cache = cache.blocks.get(block_index).ok_or(
+                CnnImageClassifierError::InvalidConfiguration(
+                    "feature block cache missing during batch backprop",
+                ),
+            )?;
+            let compute_input_grad = block_index > 0;
+            let block = self.feature_blocks.get_mut(block_index).ok_or(
+                CnnImageClassifierError::InvalidConfiguration(
+                    "feature block parameters missing during batch backprop",
+                ),
+            )?;
+            let (kernels, _bias) = block.parameter_views_mut();
+            let grad_start = Instant::now();
+            let backward = backward_conv_block_gradients(
+                kernels,
+                block_cache,
+                &pooled_grad,
+                compute_input_grad,
+            )?;
+            metrics.gradients_elapsed_ms += grad_start.elapsed().as_secs_f64() * 1000.0;
+
+            let update_start = Instant::now();
+            block.accumulate_gradients(
+                &backward.kernel_grad,
+                backward.bias_grad.as_slice(),
+            )?;
+            metrics.apply_update_elapsed_ms += update_start.elapsed().as_secs_f64() * 1000.0;
+
+            if compute_input_grad {
+                let transfer_start = Instant::now();
+                let next_grad = backward.input_grad.as_ref().ok_or(
+                    CnnImageClassifierError::InvalidConfiguration(
+                        "feature block gradient is missing pooled input gradient",
+                    ),
+                )?;
+                let expected_shape = cache.blocks[block_index - 1].pooled_shape;
+                if next_grad.shape() != expected_shape {
+                    return Err(CnnImageClassifierError::GradientTensorShapeMismatch {
+                        expected: expected_shape,
+                        actual: next_grad.shape(),
+                    });
+                }
+                pooled_grad = next_grad.clone();
+                metrics.input_grad_transfer_elapsed_ms +=
+                    transfer_start.elapsed().as_secs_f64() * 1000.0;
+            }
+        }
+
+        let apply_start = Instant::now();
+        for block in &mut self.feature_blocks {
+            block.apply_sgd_update(effective_learning_rate, batch_size)?;
+        }
+        metrics.apply_update_elapsed_ms += apply_start.elapsed().as_secs_f64() * 1000.0;
+
+        self.sync_feature_blocks_backend_mirror();
+        Ok(metrics)
 
     }
 
@@ -1665,20 +2159,25 @@ fn default_input_channels() -> usize {
 fn initialize_conv_kernels(
     out_channels: usize,
     in_channels: usize,
+    kernel_height: usize,
+    kernel_width: usize,
     oriented_first_layer: bool,
 ) -> Result<Tensor4D, CnnImageClassifierError> {
 
-    let mut values = Vec::with_capacity(out_channels * in_channels * 9);
+    let mut values = Vec::with_capacity(out_channels * in_channels * kernel_height * kernel_width);
+
+    let center_y = kernel_height / 2;
+    let center_x = kernel_width / 2;
 
     for out_c in 0..out_channels {
         for in_c in 0..in_channels {
-            let kernel = if oriented_first_layer && in_channels == 1 && out_c == 0 {
+            let kernel = if oriented_first_layer && in_channels == 1 && kernel_height == 3 && kernel_width == 3 && out_c == 0 {
                 vec![
                     -1.0, 0.0, 1.0,
                     -1.0, 0.0, 1.0,
                     -1.0, 0.0, 1.0,
                 ]
-            } else if oriented_first_layer && in_channels == 1 && out_c == 1 {
+            } else if oriented_first_layer && in_channels == 1 && kernel_height == 3 && kernel_width == 3 && out_c == 1 {
                 vec![
                     -1.0, -1.0, -1.0,
                     0.0, 0.0, 0.0,
@@ -1687,19 +2186,62 @@ fn initialize_conv_kernels(
             } else {
                 let center_weight = 1.0f32 / in_channels as f32;
                 let sign = if (out_c + in_c) % 2 == 0 { 1.0 } else { -1.0 };
-                vec![
-                    0.0, 0.0, 0.0,
-                    0.0, sign * center_weight, 0.0,
-                    0.0, 0.0, 0.0,
-                ]
+                let mut kernel = vec![0.0; kernel_height * kernel_width];
+                kernel[center_y * kernel_width + center_x] = sign * center_weight;
+                kernel
             };
             values.extend(kernel);
         }
     }
 
-    Tensor4D::from_vec(out_channels, in_channels, 3, 3, values)
+    Tensor4D::from_vec(out_channels, in_channels, kernel_height, kernel_width, values)
         .map_err(CnnImageClassifierError::Tensor)
 
+}
+
+fn forward_feature_block_with_cache(
+    input: &Tensor4D,
+    block: &ConvParameterState,
+) -> Result<(Tensor4D, ConvBlockCache), CnnImageClassifierError> {
+
+    #[cfg(feature = "offloading-mlx")]
+    if active_backend().name() == "mlx"
+        && let Some((kernels, kernels_shape, bias)) = block.mlx_mirror_views()
+    {
+        return forward_conv_block_with_mlx_mirror(input, kernels, kernels_shape, bias);
+    }
+
+    forward_conv_block(input, block.kernels(), block.bias())
+}
+
+fn forward_feature_block_with_cache_timed(
+    input: &Tensor4D,
+    block: &ConvParameterState,
+) -> Result<(Tensor4D, ConvBlockCache, CnnForwardStageMetrics), CnnImageClassifierError> {
+
+    #[cfg(feature = "offloading-mlx")]
+    if active_backend().name() == "mlx"
+        && let Some((kernels, kernels_shape, bias)) = block.mlx_mirror_views()
+    {
+        return forward_conv_block_with_mlx_mirror_timed(input, kernels, kernels_shape, bias);
+    }
+
+    forward_conv_block_timed(input, block.kernels(), block.bias())
+}
+
+fn forward_feature_block_no_cache(
+    input: &Tensor4D,
+    block: &ConvParameterState,
+) -> Result<Tensor4D, CnnImageClassifierError> {
+
+    #[cfg(feature = "offloading-mlx")]
+    if active_backend().name() == "mlx"
+        && let Some((kernels, kernels_shape, bias)) = block.mlx_mirror_views()
+    {
+        return forward_conv_block_with_mlx_mirror_no_cache(input, kernels, kernels_shape, bias);
+    }
+
+    forward_conv_block_no_cache(input, block.kernels(), block.bias())
 }
 
 fn forward_conv_block(
@@ -1727,6 +2269,41 @@ fn forward_conv_block(
 
 }
 
+fn forward_conv_block_timed(
+    input: &Tensor4D,
+    kernels: &Tensor4D,
+    bias: &[f32],
+) -> Result<(Tensor4D, ConvBlockCache, CnnForwardStageMetrics), CnnImageClassifierError> {
+
+    let conv_start = Instant::now();
+    let conv_pre = input.conv2d_valid(kernels, Some(bias), 1, 1)?;
+    let conv_elapsed_ms = conv_start.elapsed().as_secs_f64() * 1000.0;
+
+    let mut relu = conv_pre.clone();
+    relu.relu_inplace();
+
+    let pool_start = Instant::now();
+    let (pooled, pool_indices) = max_pool2d_with_indices(&relu, 2, 2, 2, 2)?;
+    let pool_elapsed_ms = pool_start.elapsed().as_secs_f64() * 1000.0;
+    let pooled_shape = pooled.shape();
+
+    Ok((
+        pooled,
+        ConvBlockCache {
+            input: input.clone(),
+            conv_pre_activation: conv_pre,
+            pool_indices,
+            pooled_shape,
+        },
+        CnnForwardStageMetrics {
+            conv_elapsed_ms,
+            pool_elapsed_ms,
+            global_pool_elapsed_ms: 0.0,
+        },
+    ))
+
+}
+
 fn forward_conv_block_no_cache(
     input: &Tensor4D,
     kernels: &Tensor4D,
@@ -1745,6 +2322,7 @@ fn forward_conv_block_with_mlx_mirror(
     kernels_shape: (usize, usize, usize, usize),
     bias: &crate::tensor::offloading::mlx_backend::MlxOwnedArray,
 ) -> Result<(Tensor4D, ConvBlockCache), CnnImageClassifierError> {
+
     let conv_pre = mlx_conv2d_valid_with_mirrored_params(input, kernels, kernels_shape, bias, 1, 1)?;
     let mut relu = conv_pre.clone();
     relu.relu_inplace();
@@ -1759,6 +2337,42 @@ fn forward_conv_block_with_mlx_mirror(
             conv_pre_activation: conv_pre,
             pool_indices,
             pooled_shape,
+        },
+    ))
+}
+
+#[cfg(feature = "offloading-mlx")]
+fn forward_conv_block_with_mlx_mirror_timed(
+    input: &Tensor4D,
+    kernels: &crate::tensor::offloading::mlx_backend::MlxOwnedArray,
+    kernels_shape: (usize, usize, usize, usize),
+    bias: &crate::tensor::offloading::mlx_backend::MlxOwnedArray,
+) -> Result<(Tensor4D, ConvBlockCache, CnnForwardStageMetrics), CnnImageClassifierError> {
+
+    let conv_start = Instant::now();
+    let conv_pre = mlx_conv2d_valid_with_mirrored_params(input, kernels, kernels_shape, bias, 1, 1)?;
+    let conv_elapsed_ms = conv_start.elapsed().as_secs_f64() * 1000.0;
+
+    let mut relu = conv_pre.clone();
+    relu.relu_inplace();
+
+    let pool_start = Instant::now();
+    let (pooled, pool_indices) = max_pool2d_with_indices(&relu, 2, 2, 2, 2)?;
+    let pool_elapsed_ms = pool_start.elapsed().as_secs_f64() * 1000.0;
+    let pooled_shape = pooled.shape();
+
+    Ok((
+        pooled,
+        ConvBlockCache {
+            input: input.clone(),
+            conv_pre_activation: conv_pre,
+            pool_indices,
+            pooled_shape,
+        },
+        CnnForwardStageMetrics {
+            conv_elapsed_ms,
+            pool_elapsed_ms,
+            global_pool_elapsed_ms: 0.0,
         },
     ))
 }
@@ -1830,10 +2444,19 @@ fn pooled_grad_from_feature_gradient(
 
 }
 
+fn tensor_shape_element_count(shape: (usize, usize, usize, usize)) -> usize {
+    shape
+        .0
+        .saturating_mul(shape.1)
+        .saturating_mul(shape.2)
+        .saturating_mul(shape.3)
+}
+
 fn pooled_grad_batch_from_feature_gradients(
     pooled_shape: (usize, usize, usize, usize),
     feature_grads: &[Vec<f32>],
 ) -> Result<Tensor4D, CnnImageClassifierError> {
+
     let (batch, channels, pooled_h, pooled_w) = pooled_shape;
 
     if feature_grads.len() != batch {
@@ -1867,6 +2490,7 @@ fn pooled_grad_batch_from_feature_gradients(
     }
 
     Ok(pooled_grad)
+
 }
 
 fn backward_conv_block(
@@ -1889,6 +2513,7 @@ fn backward_conv_block(
     )?;
 
     Ok(backward.input_grad.unwrap_or_else(|| Tensor4D::zeros(0, 0, 0, 0)))
+
 }
 
 fn backward_conv_block_gradients(
@@ -1909,6 +2534,7 @@ fn backward_conv_block_gradients(
             compute_input_grad,
         )
         .map_err(CnnImageClassifierError::Tensor)
+        
 }
 
 fn add_bias_grad(accum: &mut [f32], grad: &[f32]) -> Result<(), CnnImageClassifierError> {
@@ -2235,6 +2861,27 @@ mod tests {
 
         assert!(predicted_cat.is_some());
         assert!(predicted_dog.is_some());
+    }
+
+    #[test]
+    fn cnn_classifier_supports_non_3x3_kernel_initialization() {
+        let classifier = CnnImageClassifier::new_with_feature_channels_and_kernel_size(
+            vec!["animal_cat".to_string(), "animal_dog".to_string()],
+            16,
+            16,
+            &[2],
+            5,
+            5,
+            0.2,
+        )
+        .unwrap_or_else(|_| panic!("kernel-size aware classifier should initialize"));
+
+        let image = vertical_stripes_image_8x8();
+        let features = classifier
+            .extract_features(image.as_slice())
+            .unwrap_or_else(|_| panic!("feature extraction should succeed"));
+
+        assert!(!features.is_empty());
     }
 
     #[test]

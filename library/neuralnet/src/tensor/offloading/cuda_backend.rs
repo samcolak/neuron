@@ -13,28 +13,15 @@ use cudarc::nvrtc::compile_ptx;
 #[cfg(feature = "offloading-cuda")]
 use std::panic::{self, AssertUnwindSafe};
 #[cfg(feature = "offloading-cuda")]
+use std::time::Instant;
+#[cfg(feature = "offloading-cuda")]
 use std::collections::HashMap;
 #[cfg(feature = "offloading-cuda")]
 use std::sync::{Arc, Mutex, OnceLock};
 
 #[cfg(feature = "offloading-cuda")]
-static CUDA_ALLOW_CPU_FALLBACK: OnceLock<bool> = OnceLock::new();
-
-#[cfg(feature = "offloading-cuda")]
 fn cuda_allow_cpu_fallback() -> bool {
-    *CUDA_ALLOW_CPU_FALLBACK.get_or_init(|| {
-        std::env::var("NEURALNET_ALLOW_CPU_FALLBACK")
-            .or_else(|_| std::env::var("NEURALNET_CUDA_ALLOW_CPU_FALLBACK"))
-            .ok()
-            .map(|value| {
-                let normalized = value.trim().to_ascii_lowercase();
-                normalized == "1"
-                    || normalized == "true"
-                    || normalized == "yes"
-                    || normalized == "on"
-            })
-            .unwrap_or(true)
-    })
+    crate::tensor::backend::cpu_fallback_enabled()
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1384,6 +1371,7 @@ fn cuda_conv_block_backward_gradients_kernel(
     let (_, _, conv_h, conv_w) = conv_pre_activation.shape();
     let (_, _, in_h, in_w) = input.shape();
 
+    let bias_start = Instant::now();
     let bias_grad = if channels == 0 {
         Vec::new()
     } else {
@@ -1439,6 +1427,7 @@ fn cuda_conv_block_backward_gradients_kernel(
 
         bias_grad
     };
+    
 
     let has_kernel_grad = channels > 0 && in_channels > 0 && kernel_h > 0 && kernel_w > 0;
     let has_input_grad = compute_input_grad && in_channels > 0 && in_h > 0 && in_w > 0;
@@ -1474,6 +1463,7 @@ fn cuda_conv_block_backward_gradients_kernel(
         None
     };
 
+    let dw_start = Instant::now();
     let kernel_grad = if !has_kernel_grad {
         Tensor4D::zeros(channels, in_channels, kernel_h, kernel_w)
     } else {
@@ -1540,6 +1530,7 @@ fn cuda_conv_block_backward_gradients_kernel(
         Tensor4D::from_vec(channels, in_channels, kernel_h, kernel_w, kernel_grad_values)?
     };
 
+    let dinput_start = Instant::now();
     let input_grad = if compute_input_grad {
         if !has_input_grad {
             Some(Tensor4D::zeros(1, in_channels, in_h, in_w))

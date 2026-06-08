@@ -16,23 +16,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 #[cfg(feature = "offloading-mlx")]
-static MLX_ALLOW_CPU_FALLBACK: OnceLock<bool> = OnceLock::new();
-
-#[cfg(feature = "offloading-mlx")]
 fn mlx_allow_cpu_fallback() -> bool {
-    *MLX_ALLOW_CPU_FALLBACK.get_or_init(|| {
-        std::env::var("NEURALNET_ALLOW_CPU_FALLBACK")
-            .or_else(|_| std::env::var("NEURALNET_MLX_ALLOW_CPU_FALLBACK"))
-            .ok()
-            .map(|value| {
-                let normalized = value.trim().to_ascii_lowercase();
-                normalized == "1"
-                    || normalized == "true"
-                    || normalized == "yes"
-                    || normalized == "on"
-            })
-            .unwrap_or(true)
-    })
+    crate::tensor::backend::cpu_fallback_enabled()
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -58,7 +43,6 @@ pub struct MlxBackpropPathSnapshot {
     pub total_calls: u64,
     pub full_native_success: u64,
     pub full_cpu_fallback: u64,
-    pub fallback_batch_split_disabled: u64,
     pub fallback_incompatible_shapes: u64,
     pub fallback_shape_mismatch: u64,
     pub fallback_invalid_argument: u64,
@@ -118,7 +102,6 @@ struct MlxBackpropPathCounters {
     total_calls: AtomicU64,
     full_native_success: AtomicU64,
     full_cpu_fallback: AtomicU64,
-    fallback_batch_split_disabled: AtomicU64,
     fallback_incompatible_shapes: AtomicU64,
     fallback_shape_mismatch: AtomicU64,
     fallback_invalid_argument: AtomicU64,
@@ -152,9 +135,6 @@ pub fn mlx_backprop_path_snapshot() -> MlxBackpropPathSnapshot {
             total_calls: counters.total_calls.load(Ordering::Relaxed),
             full_native_success: counters.full_native_success.load(Ordering::Relaxed),
             full_cpu_fallback: counters.full_cpu_fallback.load(Ordering::Relaxed),
-            fallback_batch_split_disabled: counters
-                .fallback_batch_split_disabled
-                .load(Ordering::Relaxed),
             fallback_incompatible_shapes: counters
                 .fallback_incompatible_shapes
                 .load(Ordering::Relaxed),
@@ -194,9 +174,6 @@ pub fn mlx_backprop_path_reset() {
         counters.total_calls.store(0, Ordering::Relaxed);
         counters.full_native_success.store(0, Ordering::Relaxed);
         counters.full_cpu_fallback.store(0, Ordering::Relaxed);
-        counters
-            .fallback_batch_split_disabled
-            .store(0, Ordering::Relaxed);
         counters
             .fallback_incompatible_shapes
             .store(0, Ordering::Relaxed);
@@ -379,27 +356,27 @@ fn mlx_conv_block_backward_gradients_fallback(
             counters.full_native_success.fetch_add(1, Ordering::Relaxed);
             return Ok(result);
         }
-
-        if let Err(err) = &native_result {
-            match err {
-                TensorError::IncompatibleShapes { .. } => {
-                    counters
-                        .fallback_incompatible_shapes
-                        .fetch_add(1, Ordering::Relaxed);
-                }
-                TensorError::ShapeMismatch { .. } => {
-                    counters
-                        .fallback_shape_mismatch
-                        .fetch_add(1, Ordering::Relaxed);
-                }
-                TensorError::InvalidArgument(_) => {
-                    counters
-                        .fallback_invalid_argument
-                        .fetch_add(1, Ordering::Relaxed);
-                }
-                _ => {
-                    counters.fallback_other.fetch_add(1, Ordering::Relaxed);
-                }
+        let Err(ref err) = native_result else {
+            unreachable!()
+        };
+        match err {
+            TensorError::IncompatibleShapes { .. } => {
+                counters
+                    .fallback_incompatible_shapes
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            TensorError::ShapeMismatch { .. } => {
+                counters
+                    .fallback_shape_mismatch
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            TensorError::InvalidArgument(_) => {
+                counters
+                    .fallback_invalid_argument
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {
+                counters.fallback_other.fetch_add(1, Ordering::Relaxed);
             }
         }
 
@@ -708,8 +685,6 @@ fn mlx_conv_block_backward_gradients_native(
         )?;
     }
 
-    let conv_grad_tensor = mlx_array_to_tensor(conv_grad_masked, stream)?;
-
     let intended_native_dw = mlx_enable_experimental_native_dw();
     if intended_native_dw {
         counters.intended_native_dw.fetch_add(1, Ordering::Relaxed);
@@ -780,6 +755,14 @@ fn mlx_conv_block_backward_gradients_native(
     let bias_tensor = mlx_array_to_tensor(bias_arr, stream)?;
     let bias_grad = bias_tensor.first_sample_features();
 
+    let needs_cpu_kernel_grad = matches!(native_kernel_grad, Some(Err(_)) | None);
+    let needs_cpu_input_grad = compute_input_grad && matches!(native_input_grad, Some(Err(_)) | None);
+    let conv_grad_tensor = if needs_cpu_kernel_grad || needs_cpu_input_grad {
+        Some(mlx_array_to_tensor(conv_grad_masked, stream)?)
+    } else {
+        None
+    };
+
     unsafe {
         let _ = raw::mlx_array_free(pooled_grad_arr);
         let _ = raw::mlx_array_free(packed_indices_arr);
@@ -801,9 +784,21 @@ fn mlx_conv_block_backward_gradients_native(
             if !mlx_allow_cpu_fallback() {
                 return Err(err);
             }
-            cpu_kernel_grad_from_conv_grad(kernels, input, &conv_grad_tensor)?
+            cpu_kernel_grad_from_conv_grad(
+                kernels,
+                input,
+                conv_grad_tensor
+                    .as_ref()
+                    .expect("conv_grad tensor should be materialized for CPU fallback"),
+            )?
         }
-        None => cpu_kernel_grad_from_conv_grad(kernels, input, &conv_grad_tensor)?,
+        None => cpu_kernel_grad_from_conv_grad(
+            kernels,
+            input,
+            conv_grad_tensor
+                .as_ref()
+                .expect("conv_grad tensor should be materialized for CPU gradient path"),
+        )?,
     };
 
     let input_grad = if compute_input_grad {
@@ -813,9 +808,19 @@ fn mlx_conv_block_backward_gradients_native(
                 if !mlx_allow_cpu_fallback() {
                     return Err(err);
                 }
-                Some(cpu_input_grad_from_conv_grad(kernels, &conv_grad_tensor)?)
+                Some(cpu_input_grad_from_conv_grad(
+                    kernels,
+                    conv_grad_tensor
+                        .as_ref()
+                        .expect("conv_grad tensor should be materialized for CPU fallback"),
+                )?)
             }
-            None => Some(cpu_input_grad_from_conv_grad(kernels, &conv_grad_tensor)?),
+            None => Some(cpu_input_grad_from_conv_grad(
+                kernels,
+                conv_grad_tensor
+                    .as_ref()
+                    .expect("conv_grad tensor should be materialized for CPU gradient path"),
+            )?),
         }
     } else {
         None
@@ -830,18 +835,12 @@ fn mlx_conv_block_backward_gradients_native(
 
 #[cfg(feature = "offloading-mlx")]
 fn mlx_enable_experimental_native_dw() -> bool {
-    match std::env::var("NEURALNET_MLX_NATIVE_DW") {
-        Ok(value) => matches!(value.as_str(), "1" | "true" | "TRUE" | "on" | "ON"),
-        Err(_) => false,
-    }
+    crate::tensor::backend::native_dw_enabled()
 }
 
 #[cfg(feature = "offloading-mlx")]
 fn mlx_enable_experimental_native_dinput() -> bool {
-    match std::env::var("NEURALNET_MLX_NATIVE_DINPUT") {
-        Ok(value) => matches!(value.as_str(), "1" | "true" | "TRUE" | "on" | "ON"),
-        Err(_) => false,
-    }
+    crate::tensor::backend::native_dinput_enabled()
 }
 
 #[cfg(feature = "offloading-mlx")]
@@ -987,6 +986,7 @@ fn mlx_input_grad_native_from_conv_grad_array(
     Ok(input_grad)
 }
 
+#[cfg(feature = "offloading-mlx")]
 fn cpu_kernel_grad_from_conv_grad(
     kernels: &Tensor4D,
     input: &Tensor4D,
@@ -1028,6 +1028,7 @@ fn cpu_kernel_grad_from_conv_grad(
     Ok(kernel_grad)
 }
 
+#[cfg(feature = "offloading-mlx")]
 fn cpu_input_grad_from_conv_grad(
     kernels: &Tensor4D,
     conv_grad: &Tensor4D,

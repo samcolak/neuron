@@ -6,24 +6,29 @@ use crate::tensor::backend::{active_backend, TensorBackend};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TensorError {
+
     ShapeMismatch {
         expected: usize,
         actual: usize,
     },
+
     IncompatibleShapes {
         left: (usize, usize, usize, usize),
         right: (usize, usize, usize, usize),
     },
+
     OutOfBounds {
         n: usize,
         c: usize,
         h: usize,
         w: usize,
     },
+
     InvalidArgument(&'static str),
 }
 
 impl Display for TensorError {
+
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ShapeMismatch { expected, actual } => {
@@ -50,6 +55,7 @@ impl Display for TensorError {
             Self::InvalidArgument(message) => write!(f, "invalid tensor argument: {}", message),
         }
     }
+    
 }
 
 impl Error for TensorError {}

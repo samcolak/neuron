@@ -3,6 +3,27 @@ use std::cmp::{max, min};
 use super::cnn_trainer::CnnTrainerBatch;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageTensorShape {
+    pub height: usize,
+    pub width: usize,
+    pub channels: usize,
+}
+
+impl ImageTensorShape {
+    pub fn new(height: usize, width: usize, channels: usize) -> Option<Self> {
+        if height == 0 || width == 0 || channels == 0 {
+            return None;
+        }
+
+        Some(Self {
+            height,
+            width,
+            channels,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipelineMode {
     Train,
     Eval,
@@ -95,7 +116,17 @@ impl ImageTransformPipeline {
     }
 
     pub fn apply(&self, image_bytes: &[u8], rng: &mut TransformRng, mode: PipelineMode) -> Vec<u8> {
-        let mut sample = match ImageSample::from_square_image_bytes(image_bytes) {
+        self.apply_with_shape(image_bytes, None, rng, mode)
+    }
+
+    pub fn apply_with_shape(
+        &self,
+        image_bytes: &[u8],
+        shape: Option<ImageTensorShape>,
+        rng: &mut TransformRng,
+        mode: PipelineMode,
+    ) -> Vec<u8> {
+        let mut sample = match ImageSample::from_bytes(image_bytes, shape) {
             Some(sample) => sample,
             None => return image_bytes.to_vec(),
         };
@@ -124,6 +155,7 @@ impl ImageTransformPipeline {
 pub struct LabeledImageRecord {
     pub label: String,
     pub image: Vec<u8>,
+    pub shape: Option<ImageTensorShape>,
 }
 
 impl LabeledImageRecord {
@@ -131,6 +163,15 @@ impl LabeledImageRecord {
         Self {
             label: label.to_string(),
             image,
+            shape: None,
+        }
+    }
+
+    pub fn new_with_shape(label: &str, image: Vec<u8>, shape: ImageTensorShape) -> Self {
+        Self {
+            label: label.to_string(),
+            image,
+            shape: Some(shape),
         }
     }
 }
@@ -178,7 +219,20 @@ impl CnnDataLoader {
             .map(|(label, image)| LabeledImageRecord {
                 label: label.clone(),
                 image: image.clone(),
+                shape: infer_square_image_shape(image.as_slice()),
             })
+            .collect();
+        Self { records, options }
+    }
+
+    pub fn from_samples_with_shape(
+        samples: &[(String, Vec<u8>)],
+        shape: ImageTensorShape,
+        options: CnnDataLoaderOptions,
+    ) -> Self {
+        let records = samples
+            .iter()
+            .map(|(label, image)| LabeledImageRecord::new_with_shape(label, image.clone(), shape))
             .collect();
         Self { records, options }
     }
@@ -272,15 +326,27 @@ struct ImageSample {
 }
 
 impl ImageSample {
-    fn from_square_image_bytes(image_bytes: &[u8]) -> Option<Self> {
-        let (height, width, channels) = infer_square_dimensions_and_channels(image_bytes)?;
+    fn from_bytes(image_bytes: &[u8], shape: Option<ImageTensorShape>) -> Option<Self> {
+        let shape = match shape {
+            Some(shape) => shape,
+            None => infer_square_image_shape(image_bytes)?,
+        };
+        let expected = shape.height.saturating_mul(shape.width).saturating_mul(shape.channels);
+        if expected != image_bytes.len() {
+            return None;
+        }
         Some(Self {
-            height,
-            width,
-            channels,
+            height: shape.height,
+            width: shape.width,
+            channels: shape.channels,
             bytes: image_bytes.to_vec(),
         })
     }
+}
+
+fn infer_square_image_shape(image_bytes: &[u8]) -> Option<ImageTensorShape> {
+    let (height, width, channels) = infer_square_dimensions_and_channels(image_bytes)?;
+    ImageTensorShape::new(height, width, channels)
 }
 
 fn fisher_yates_shuffle(values: &mut [usize], seed: u64) {
@@ -520,6 +586,19 @@ mod tests {
         assert_ne!(train, eval);
         assert_eq!(train.len(), image.len());
         assert_eq!(eval.len(), image.len());
+    }
+
+    #[test]
+    fn pipeline_applies_transforms_to_rectangular_images_with_shape_metadata() {
+        let pipeline = ImageTransformPipeline::new(vec![ImageTransform::NormalizeMinMax]);
+        let image = vec![42u8; 48];
+        let shape = ImageTensorShape::new(4, 12, 1).unwrap_or_else(|| panic!("shape should be valid"));
+
+        let mut rng = TransformRng::new(7);
+        let output = pipeline.apply_with_shape(image.as_slice(), Some(shape), &mut rng, PipelineMode::Eval);
+
+        assert_eq!(output.len(), image.len());
+        assert_eq!(output, image);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
+use crate::cnn::data_pipeline::ImageTensorShape;
 use crate::tensor::adapters::{
     image_bytes_to_tensor_nchw_resized_with_channels,
     TensorAdapterError,
@@ -25,19 +26,25 @@ pub enum CnnFeatureExtractorError {
 }
 
 impl Display for CnnFeatureExtractorError {
+
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+
         match self {
+
             Self::UnsupportedImageShape { byte_len } => {
                 write!(
                     f,
                     "unsupported image shape for CNN extractor (expected square bytes with 1, 3, or 4 channels): {} bytes",
                     byte_len
                 )
-            }
+            },
+
             Self::TensorAdapter(err) => write!(f, "cnn extractor adapter error: {err}"),
             Self::Tensor(err) => write!(f, "cnn extractor tensor error: {err}"),
         }
+
     }
+
 }
 
 impl Error for CnnFeatureExtractorError {}
@@ -63,6 +70,7 @@ impl Default for CnnFeatureExtractor {
 impl CnnFeatureExtractor {
 
     pub fn new(input_height: usize, input_width: usize) -> Self {
+
         let kernels = Tensor4D::from_vec(
             2,
             1,
@@ -85,6 +93,7 @@ impl CnnFeatureExtractor {
             kernels,
             bias: vec![0.0, 0.0],
         }
+
     }
 
     pub fn extract_feature_tokens(
@@ -109,6 +118,53 @@ impl CnnFeatureExtractor {
         )?;
 
         let input = if in_channels == 1 {
+            input
+        } else {
+            collapse_to_single_channel(&input)?
+        };
+
+        let pooled = input.conv_relu_max_pool2d_valid(
+            &self.kernels,
+            Some(self.bias.as_slice()),
+            1,
+            1,
+            2,
+            2,
+            2,
+            2,
+        )?;
+        let mut tokens = quantize_channels(&pooled)?;
+
+        let global_pooled = pooled.global_average_pool2d()?;
+        let mean_activation = if global_pooled.is_empty() {
+            0.0
+        } else {
+            global_pooled.as_slice().iter().sum::<f32>() / global_pooled.len() as f32
+        };
+        let mean_bucket = (mean_activation.clamp(0.0, 3.0) * 10.0) as usize;
+        tokens.push(format!("g{}", mean_bucket.min(30)));
+
+        Ok(tokens)
+
+    }
+
+    pub fn extract_feature_tokens_with_dimensions(
+        &self,
+        image_bytes: &[u8],
+        shape: ImageTensorShape,
+    ) -> Result<Vec<String>, CnnFeatureExtractorError> {
+
+        let input = image_bytes_to_tensor_nchw_resized_with_channels(
+            image_bytes,
+            shape.height,
+            shape.width,
+            shape.channels,
+            self.input_height,
+            self.input_width,
+            true,
+        )?;
+
+        let input = if shape.channels == 1 {
             input
         } else {
             collapse_to_single_channel(&input)?
@@ -167,6 +223,7 @@ fn infer_square_dimensions_and_channels(image_bytes: &[u8]) -> Option<(usize, us
 }
 
 fn collapse_to_single_channel(input: &Tensor4D) -> Result<Tensor4D, TensorError> {
+
     let (n, c, h, w) = input.shape();
     let mut collapsed = Tensor4D::zeros(n, 1, h, w);
 
@@ -183,6 +240,7 @@ fn collapse_to_single_channel(input: &Tensor4D) -> Result<Tensor4D, TensorError>
     }
 
     Ok(collapsed)
+
 }
 
 fn quantize_channels(pooled: &Tensor4D) -> Result<Vec<String>, TensorError> {
@@ -276,4 +334,21 @@ mod tests {
         assert!(!tokens.is_empty());
         assert!(tokens.iter().any(|token| token.starts_with("g")));
     }
+
+    #[test]
+    fn extractor_supports_rectangular_images_with_explicit_dimensions() {
+        
+        let extractor = CnnFeatureExtractor::new(16, 16);
+        let image = vec![32u8; 48];
+        let shape = crate::cnn::data_pipeline::ImageTensorShape::new(4, 12, 1)
+            .unwrap_or_else(|| panic!("shape should be valid"));
+
+        let tokens = extractor
+            .extract_feature_tokens_with_dimensions(image.as_slice(), shape)
+            .unwrap_or_else(|_| panic!("extractor should support rectangular inputs"));
+
+        assert!(!tokens.is_empty());
+
+    }
+    
 }

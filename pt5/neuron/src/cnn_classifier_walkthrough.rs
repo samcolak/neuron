@@ -15,6 +15,7 @@ use neuralnet::cnn::cnn_trainer::{
 use neuralnet::cnn::data_pipeline::{
     CnnDataLoader,
     CnnDataLoaderOptions,
+    ImageTensorShape,
     ImageTransform,
     ImageTransformPipeline,
 };
@@ -22,7 +23,6 @@ use neuralnet::tensor::backend::active_backend_label;
 use neuralnet::tensor::backend::{mlx_backprop_path_reset, mlx_backprop_path_snapshot};
 use neuralnet::training::linear_head::LinearOptimizer;
 use std::env;
-use std::time::Instant;
 
 #[derive(Debug, Clone)]
 struct OptimizerSummary {
@@ -54,14 +54,9 @@ struct ScaleOptionSummary {
     micro_batch_size: usize,
     accumulation_steps: usize,
     effective_batch_size: usize,
-    mean_throughput_sps: f64,
     mean_epoch_to_threshold: f64,
-    mean_ms_to_threshold: f64,
     peak_inflight_bytes: usize,
     final_mean_micro_f1: f64,
-    mean_transform_ms_per_epoch: f64,
-    mean_update_ms_per_epoch: f64,
-    mean_flush_ms_per_epoch: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -70,19 +65,12 @@ struct LargeBenchmarkSummary {
     sample_count: usize,
     batch_size: usize,
     effective_batch_size: usize,
-    feature_extract_samples_per_sec: f64,
-    train_throughput_samples_per_sec: f64,
-    epoch_elapsed_ms: f64,
-    transform_ms: f64,
-    update_ms: f64,
-    flush_ms: f64,
     eval_micro_f1: f64,
 }
 
 #[derive(Debug, Clone)]
 struct SchedulerRecipeSummary {
     predictions: Vec<Option<(String, f32)>>,
-    elapsed_ms: f64,
     known_predictions: usize,
 }
 
@@ -117,6 +105,8 @@ fn collect_optimizer_summary(
     micro_f1_threshold: f64,
 ) -> Vec<OptimizerSummary> {
     let mut summaries = Vec::new();
+    let sample_shape = ImageTensorShape::new(8, 8, 1)
+        .unwrap_or_else(|| panic!("optimizer summary image shape should be valid"));
 
     let configs = vec![
         OptimizerSweepConfig {
@@ -180,8 +170,9 @@ fn collect_optimizer_summary(
                 candidate.configure_head_adam(beta1, beta2, epsilon);
             }
 
-            let loader = CnnDataLoader::from_samples(
+            let loader = CnnDataLoader::from_samples_with_shape(
                 samples,
+                sample_shape,
                 CnnDataLoaderOptions {
                     batch_size: 2,
                     shuffle: true,
@@ -270,6 +261,8 @@ fn collect_scale_option_summary(
             accumulation_steps: 2,
         },
     ];
+    let sample_shape = ImageTensorShape::new(8, 8, 1)
+        .unwrap_or_else(|| panic!("scale summary image shape should be valid"));
 
     let pipeline = ImageTransformPipeline::new(vec![
         ImageTransform::RandomHorizontalFlip { probability: 0.5 },
@@ -288,18 +281,14 @@ fn collect_scale_option_summary(
     let mut rows = Vec::new();
 
     for option in options {
-        let mut throughput_values = Vec::new();
         let mut epoch_to_threshold_values = Vec::new();
-        let mut ms_to_threshold_values = Vec::new();
         let mut final_micro_f1_values = Vec::new();
-        let mut transform_ms_values = Vec::new();
-        let mut update_ms_values = Vec::new();
-        let mut flush_ms_values = Vec::new();
         let mut peak_inflight_bytes = 0usize;
 
         for seed in train_seeds {
-            let loader = CnnDataLoader::from_samples(
+            let loader = CnnDataLoader::from_samples_with_shape(
                 samples,
+                sample_shape,
                 CnnDataLoaderOptions {
                     batch_size: 8,
                     shuffle: true,
@@ -321,12 +310,6 @@ fn collect_scale_option_summary(
             candidate.configure_head_adam(0.90, 0.999, 1e-8);
 
             let mut reached_epoch = (max_epochs + 1) as f64;
-            let mut reached_ms = 0.0f64;
-            let mut elapsed_ms_total = 0.0f64;
-            let mut throughput_sum = 0.0f64;
-            let mut transform_ms_sum = 0.0f64;
-            let mut update_ms_sum = 0.0f64;
-            let mut flush_ms_sum = 0.0f64;
 
             for epoch in 0..max_epochs {
                 let scale_report = candidate.train_with_data_loader_scaled(
@@ -335,30 +318,18 @@ fn collect_scale_option_summary(
                     epoch as u64,
                     option,
                 );
-
-                elapsed_ms_total += scale_report.elapsed_ms as f64;
-                throughput_sum += scale_report.throughput_samples_per_sec;
-                transform_ms_sum += scale_report.transform_elapsed_ms as f64;
-                update_ms_sum += scale_report.update_elapsed_ms as f64;
-                flush_ms_sum += scale_report.flush_elapsed_ms as f64;
                 peak_inflight_bytes = peak_inflight_bytes.max(scale_report.max_inflight_bytes);
 
                 let epoch_report =
                     candidate.evaluate_labeled_images_with_pipeline(eval, &pipeline, eval_seed);
                 if reached_epoch > max_epochs as f64 && epoch_report.micro_f1 >= micro_f1_threshold {
                     reached_epoch = (epoch + 1) as f64;
-                    reached_ms = elapsed_ms_total;
                 }
             }
 
             let final_report =
                 candidate.evaluate_labeled_images_with_pipeline(eval, &pipeline, eval_seed);
-            throughput_values.push(throughput_sum / max_epochs as f64);
-            transform_ms_values.push(transform_ms_sum / max_epochs as f64);
-            update_ms_values.push(update_ms_sum / max_epochs as f64);
-            flush_ms_values.push(flush_ms_sum / max_epochs as f64);
             epoch_to_threshold_values.push(reached_epoch);
-            ms_to_threshold_values.push(reached_ms);
             final_micro_f1_values.push(final_report.micro_f1);
         }
 
@@ -371,14 +342,9 @@ fn collect_scale_option_summary(
             micro_batch_size: option.micro_batch_size,
             accumulation_steps: option.accumulation_steps,
             effective_batch_size: option.effective_batch_size(),
-            mean_throughput_sps: mean(throughput_values.as_slice()),
             mean_epoch_to_threshold: mean(epoch_to_threshold_values.as_slice()),
-            mean_ms_to_threshold: mean(ms_to_threshold_values.as_slice()),
             peak_inflight_bytes,
             final_mean_micro_f1: mean(final_micro_f1_values.as_slice()),
-            mean_transform_ms_per_epoch: mean(transform_ms_values.as_slice()),
-            mean_update_ms_per_epoch: mean(update_ms_values.as_slice()),
-            mean_flush_ms_per_epoch: mean(flush_ms_values.as_slice()),
         });
     }
 
@@ -404,6 +370,8 @@ fn collect_large_benchmark_summary() -> LargeBenchmarkSummary {
     // - 300 samples total  (150 per class)
     // Run with `cargo run --release` for meaningful numbers.
     let image_side = 128usize;
+    let image_shape = ImageTensorShape::new(image_side, image_side, 1)
+        .unwrap_or_else(|| panic!("benchmark image shape should be valid"));
     let feature_channels = 16usize;
     let samples_per_label = 150usize;
     let mut samples = Vec::with_capacity(samples_per_label * 2);
@@ -423,8 +391,9 @@ fn collect_large_benchmark_summary() -> LargeBenchmarkSummary {
         CnnEvaluationSample::new("animal_dog", striped_image(image_side, false, 1)),
     ];
 
-    let loader = CnnDataLoader::from_samples(
+    let loader = CnnDataLoader::from_samples_with_shape(
         samples.as_slice(),
+        image_shape,
         CnnDataLoaderOptions {
             batch_size: 32,
             shuffle: true,
@@ -456,17 +425,7 @@ fn collect_large_benchmark_summary() -> LargeBenchmarkSummary {
     classifier.set_head_optimizer(LinearOptimizer::Adam);
     classifier.configure_head_adam(0.90, 0.999, 1e-8);
 
-    // Feature-extraction throughput: fused path per image.
-    let bench_images: Vec<Vec<u8>> = samples.iter().map(|(_, image)| image.clone()).collect();
-    let feature_start = Instant::now();
-    for image in &bench_images {
-        let _ = classifier
-            .extract_features(image.as_slice())
-            .unwrap_or_else(|_| panic!("feature extraction benchmark should succeed"));
-    }
-    let feature_elapsed = feature_start.elapsed().as_secs_f64();
-
-    let scale_report = classifier.train_with_data_loader_scaled(
+    let _ = classifier.train_with_data_loader_scaled(
         &loader,
         &pipeline,
         0,
@@ -486,12 +445,6 @@ fn collect_large_benchmark_summary() -> LargeBenchmarkSummary {
         sample_count: samples.len(),
         batch_size: 32,
         effective_batch_size: 32,
-        feature_extract_samples_per_sec: bench_images.len() as f64 / feature_elapsed.max(1e-9),
-        train_throughput_samples_per_sec: scale_report.throughput_samples_per_sec,
-        epoch_elapsed_ms: scale_report.elapsed_ms as f64,
-        transform_ms: scale_report.transform_elapsed_ms as f64,
-        update_ms: scale_report.update_elapsed_ms as f64,
-        flush_ms: scale_report.flush_elapsed_ms as f64,
         eval_micro_f1: eval_report.micro_f1,
     }
 }
@@ -499,10 +452,10 @@ fn collect_large_benchmark_summary() -> LargeBenchmarkSummary {
 fn run_scheduler_production_recipe(
     classifier: &CnnImageClassifier,
     images: &[Vec<u8>],
+    shape: ImageTensorShape,
     options: CnnCoalescingPredictOptions,
 ) -> SchedulerRecipeSummary {
-    let scheduler_start = Instant::now();
-    let mut scheduler = classifier.start_coalescing_scheduler(options);
+    let mut scheduler = classifier.start_coalescing_scheduler_with_dimensions(options, shape);
 
     let request_handles: Vec<_> = images
         .iter()
@@ -534,7 +487,6 @@ fn run_scheduler_production_recipe(
     let known_predictions = predictions.iter().filter(|prediction| prediction.is_some()).count();
     SchedulerRecipeSummary {
         predictions,
-        elapsed_ms: scheduler_start.elapsed().as_secs_f64() * 1_000.0,
         known_predictions,
     }
 }
@@ -634,6 +586,9 @@ pub fn run_cnn_classifier_walkthrough() {
             .unwrap_or_else(|| "<unknown>".to_string())
     );
 
+    let walkthrough_shape = ImageTensorShape::new(8, 8, 1)
+        .unwrap_or_else(|| panic!("walkthrough image shape should be valid"));
+
     let enterprise_batch_images = vec![
         cat_image.clone(),
         dog_image.clone(),
@@ -646,8 +601,11 @@ pub fn run_cnn_classifier_walkthrough() {
     ];
 
     let batch_report = classifier
-        .predict_batch_with_confidence_report(
+        .predict_batch_with_confidence_report_with_dimensions(
             enterprise_batch_images.as_slice(),
+            8,
+            8,
+            1,
             CnnBatchPredictOptions {
                 max_micro_batch_size: 4,
                 enable_batch_preprocess: true,
@@ -656,14 +614,10 @@ pub fn run_cnn_classifier_walkthrough() {
         .unwrap_or_else(|_| panic!("batch prediction report should succeed"));
 
     println!(
-        "  enterprise inference batch: images={} micro_batches={} max_micro_batch={} throughput={:.1} img/s preprocess_ms={:.2} model_ms={:.2} total_ms={:.2}",
+        "  enterprise inference batch: images={} micro_batches={} max_micro_batch={}",
         batch_report.total_images,
         batch_report.micro_batch_count,
         batch_report.max_micro_batch_size,
-        batch_report.throughput_images_per_sec,
-        batch_report.preprocessing_elapsed_ms,
-        batch_report.model_elapsed_ms,
-        batch_report.total_elapsed_ms,
     );
 
     let mut coalesced_predictor = classifier.coalescing_batch_predictor(CnnCoalescingPredictOptions {
@@ -685,20 +639,17 @@ pub fn run_cnn_classifier_walkthrough() {
         .unwrap_or_else(|_| panic!("coalesced predictor finish should succeed"));
 
     println!(
-        "  enterprise inference coalesced: images={} flushes={} max_micro_batch={} throughput={:.1} img/s preprocess_ms={:.2} model_ms={:.2} total_ms={:.2}",
+        "  enterprise inference coalesced: images={} flushes={} max_micro_batch={}",
         coalesced_report.total_images,
         coalesced_report.micro_batch_count,
         coalesced_report.max_micro_batch_size,
-        coalesced_report.throughput_images_per_sec,
-        coalesced_report.preprocessing_elapsed_ms,
-        coalesced_report.model_elapsed_ms,
-        coalesced_report.total_elapsed_ms,
     );
 
     println!("  coalescing scheduler walkthrough (production recipe helper)");
     let scheduler_summary = run_scheduler_production_recipe(
         &classifier,
         enterprise_batch_images.as_slice(),
+        walkthrough_shape,
         CnnCoalescingPredictOptions {
         max_micro_batch_size: 4,
         max_queue_size: 8,
@@ -714,10 +665,9 @@ pub fn run_cnn_classifier_walkthrough() {
     };
 
     println!(
-        "  scheduler result: requests={} known_predictions={} elapsed_ms={:.2} parity_vs_batch={}",
+        "  scheduler result: requests={} known_predictions={} parity_vs_batch={}",
         scheduler_summary.predictions.len(),
         scheduler_summary.known_predictions,
-        scheduler_summary.elapsed_ms,
         scheduler_parity,
     );
 
@@ -738,8 +688,9 @@ pub fn run_cnn_classifier_walkthrough() {
         ("animal_dog".to_string(), horizontal_stripes_image_8x8()),
         ("animal_dog".to_string(), dog_image.clone()),
     ];
-    let loader = CnnDataLoader::from_samples(
+    let loader = CnnDataLoader::from_samples_with_shape(
         augmented_samples.as_slice(),
+        walkthrough_shape,
         CnnDataLoaderOptions {
             batch_size: 2,
             shuffle: true,
@@ -848,43 +799,29 @@ pub fn run_cnn_classifier_walkthrough() {
         0.80,
     );
 
-    println!("  scale options (throughput, convergence speed, memory proxy)");
+    println!("  scale options (convergence summary)");
     for row in scale_summary {
         println!(
-            "    {}: micro_batch={} accumulation={} effective_batch={} mean_throughput={:.1} samples/s mean_epoch_to_f1>=0.80={:.2} mean_ms_to_f1>=0.80={:.1} peak_inflight_bytes={} final_mean_micro_f1={:.3} timing_ms(epoch): transform={:.2} update={:.2} flush={:.2}",
+            "    {}: micro_batch={} accumulation={} effective_batch={} mean_epoch_to_f1>=0.80={:.2} peak_inflight_bytes={} final_mean_micro_f1={:.3}",
             row.label,
             row.micro_batch_size,
             row.accumulation_steps,
             row.effective_batch_size,
-            row.mean_throughput_sps,
             row.mean_epoch_to_threshold,
-            row.mean_ms_to_threshold,
             row.peak_inflight_bytes,
             row.final_mean_micro_f1,
-            row.mean_transform_ms_per_epoch,
-            row.mean_update_ms_per_epoch,
-            row.mean_flush_ms_per_epoch,
         );
     }
 
     let large_benchmark = collect_large_benchmark_summary();
-    println!("  larger backend benchmark (128x128 / 16ch / 300 samples — run --release for meaningful numbers)");
+    println!("  larger backend benchmark (128x128 / 16ch / 300 samples)");
     println!(
-        "    images={} side={} ch=16 batch={} effective_batch={} feature_extract={:.1} samples/s train_epoch={:.1} samples/s epoch_ms={:.1} eval_micro_f1={:.3}",
+        "    images={} side={} ch=16 batch={} effective_batch={} eval_micro_f1={:.3}",
         large_benchmark.sample_count,
         large_benchmark.image_side,
         large_benchmark.batch_size,
         large_benchmark.effective_batch_size,
-        large_benchmark.feature_extract_samples_per_sec,
-        large_benchmark.train_throughput_samples_per_sec,
-        large_benchmark.epoch_elapsed_ms,
         large_benchmark.eval_micro_f1,
-    );
-    println!(
-        "    timing breakdown ms: transform={:.1} update={:.1} flush={:.1}",
-        large_benchmark.transform_ms,
-        large_benchmark.update_ms,
-        large_benchmark.flush_ms,
     );
 
     if backend_label.starts_with("mlx") {
@@ -897,8 +834,7 @@ pub fn run_cnn_classifier_walkthrough() {
             backprop.full_native_success_ratio(),
         );
         println!(
-            "  mlx fallback reasons: batch_split_disabled={} incompatible_shapes={} shape_mismatch={} invalid_argument={} other={}",
-            backprop.fallback_batch_split_disabled,
+            "  mlx fallback reasons: incompatible_shapes={} shape_mismatch={} invalid_argument={} other={}",
             backprop.fallback_incompatible_shapes,
             backprop.fallback_shape_mismatch,
             backprop.fallback_invalid_argument,
@@ -912,17 +848,6 @@ pub fn run_cnn_classifier_walkthrough() {
             backprop.intended_native_dinput,
             backprop.executed_native_dinput,
             backprop.fallback_dinput,
-        );
-        println!(
-            "  mlx native stage time: dW={:.3}ms dInput={:.3}ms",
-            backprop.native_dw_time_ns as f64 / 1_000_000.0,
-            backprop.native_dinput_time_ns as f64 / 1_000_000.0,
-        );
-        println!(
-            "  mlx native dW breakdown: transpose={:.3}ms conv={:.3}ms materialize={:.3}ms",
-            backprop.native_dw_transpose_time_ns as f64 / 1_000_000.0,
-            backprop.native_dw_conv_time_ns as f64 / 1_000_000.0,
-            backprop.native_dw_materialize_time_ns as f64 / 1_000_000.0,
         );
     }
 
@@ -1137,7 +1062,7 @@ mod tests {
     }
 
     #[test]
-    fn cnn_classifier_walkthrough_scale_summary_reports_throughput_and_threshold_metrics() {
+    fn cnn_classifier_walkthrough_scale_summary_reports_threshold_metrics() {
         let samples = vec![
             ("animal_cat".to_string(), vertical_stripes_image_8x8()),
             ("animal_cat".to_string(), vertical_stripes_image_8x8()),
@@ -1154,19 +1079,8 @@ mod tests {
             collect_scale_option_summary(samples.as_slice(), eval.as_slice(), &[3, 7], 99, 12, 0.70);
 
         assert_eq!(summary.len(), 3);
-        assert!(summary.iter().all(|row| row.mean_throughput_sps.is_finite()));
         assert!(summary.iter().all(|row| row.mean_epoch_to_threshold.is_finite()));
-        assert!(summary.iter().all(|row| row.mean_ms_to_threshold.is_finite()));
         assert!(summary.iter().all(|row| row.peak_inflight_bytes > 0));
         assert!(summary.iter().all(|row| row.final_mean_micro_f1.is_finite()));
-        assert!(summary
-            .iter()
-            .all(|row| row.mean_transform_ms_per_epoch.is_finite()));
-        assert!(summary
-            .iter()
-            .all(|row| row.mean_update_ms_per_epoch.is_finite()));
-        assert!(summary
-            .iter()
-            .all(|row| row.mean_flush_ms_per_epoch.is_finite()));
     }
 }

@@ -2,11 +2,11 @@
   "folders": [
     {
       "name": "neuralnet",
-      "path": "../library/neuralnet"
+      "path": "../library"
     },
     {
       "name": "neuron",
-      "path": "./neuron"
+      "path": "."
     }
   ],
   "settings": {

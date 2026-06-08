@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::time::Instant;
 
 use crate::cnn::classifier::CnnImageClassifier;
@@ -7,6 +7,7 @@ use crate::cnn::data_pipeline::{
     ImageTransformPipeline,
     PipelineMode,
     TransformRng,
+    ImageTensorShape,
 };
 use crate::training::metrics::{compute_quality_metrics, increment_confusion_count};
 use crate::training::trainer::{
@@ -85,25 +86,49 @@ pub struct CnnScaleTrainReport {
     pub max_inflight_samples: usize,
     pub max_inflight_bytes: usize,
     pub transform_elapsed_ms: f64,
+    pub input_elapsed_ms: f64,
+    pub feature_elapsed_ms: f64,
+    pub forward_conv_elapsed_ms: f64,
+    pub forward_pool_elapsed_ms: f64,
+    pub forward_global_pool_elapsed_ms: f64,
+    pub head_elapsed_ms: f64,
+    pub backprop_elapsed_ms: f64,
+    pub backprop_pooled_grad_elapsed_ms: f64,
+    pub backprop_gradients_elapsed_ms: f64,
+    pub backprop_apply_update_elapsed_ms: f64,
+    pub backprop_input_grad_transfer_elapsed_ms: f64,
+    pub backprop_unpool_relu_elapsed_ms: f64,
+    pub backprop_dw_elapsed_ms: f64,
+    pub backprop_dinput_elapsed_ms: f64,
+    pub backprop_bias_grad_elapsed_ms: f64,
     pub update_elapsed_ms: f64,
     pub flush_elapsed_ms: f64,
+    pub update_model_elapsed_ms: f64,
+    pub update_overhead_elapsed_ms: f64,
+    pub flush_model_elapsed_ms: f64,
+    pub flush_overhead_elapsed_ms: f64,
 }
 
-fn pop_prefix(samples: &mut Vec<Vec<u8>>, prefix_len: usize) -> Vec<Vec<u8>> {
+#[derive(Debug, Clone)]
+struct PendingTrainSample {
+    bytes: Vec<u8>,
+    shape: Option<ImageTensorShape>,
+}
+
+fn pop_prefix<T>(samples: &mut VecDeque<T>, prefix_len: usize) -> Vec<T> {
 
     let take = prefix_len.min(samples.len());
     if take == 0 {
         return Vec::new();
     }
 
-    if take == samples.len() {
-        let mut chunk = Vec::new();
-        std::mem::swap(samples, &mut chunk);
-        *samples = Vec::with_capacity(chunk.capacity());
-        return chunk;
+    let mut chunk = Vec::with_capacity(take);
+    for _ in 0..take {
+        if let Some(item) = samples.pop_front() {
+            chunk.push(item);
+        }
     }
-
-    samples.drain(..take).collect()
+    chunk
     
 }
 
@@ -143,9 +168,28 @@ impl CnnImageClassifier {
         let mut inflight_samples = 0usize;
         let mut inflight_bytes = 0usize;
         let mut transform_elapsed_ms = 0.0f64;
+        let mut input_elapsed_ms = 0.0f64;
+        let mut feature_elapsed_ms = 0.0f64;
+        let mut forward_conv_elapsed_ms = 0.0f64;
+        let mut forward_pool_elapsed_ms = 0.0f64;
+        let mut forward_global_pool_elapsed_ms = 0.0f64;
+        let mut head_elapsed_ms = 0.0f64;
+        let mut backprop_elapsed_ms = 0.0f64;
+        let mut backprop_pooled_grad_elapsed_ms = 0.0f64;
+        let mut backprop_gradients_elapsed_ms = 0.0f64;
+        let mut backprop_apply_update_elapsed_ms = 0.0f64;
+        let mut backprop_input_grad_transfer_elapsed_ms = 0.0f64;
+        let mut backprop_unpool_relu_elapsed_ms = 0.0f64;
+        let mut backprop_dw_elapsed_ms = 0.0f64;
+        let mut backprop_dinput_elapsed_ms = 0.0f64;
+        let mut backprop_bias_grad_elapsed_ms = 0.0f64;
         let mut update_elapsed_ms = 0.0f64;
         let mut flush_elapsed_ms = 0.0f64;
-        let mut pending_by_label: BTreeMap<String, Vec<Vec<u8>>> = BTreeMap::new();
+        let mut update_model_elapsed_ms = 0.0f64;
+        let mut update_overhead_elapsed_ms = 0.0f64;
+        let mut flush_model_elapsed_ms = 0.0f64;
+        let mut flush_overhead_elapsed_ms = 0.0f64;
+        let mut pending_by_label: BTreeMap<String, VecDeque<PendingTrainSample>> = BTreeMap::new();
 
         for index in data_loader.epoch_indices(epoch) {
             let Some(record) = data_loader.record_at(index) else {
@@ -159,8 +203,9 @@ impl CnnImageClassifier {
             }
 
             let transform_start = Instant::now();
-            let transformed = pipeline.apply(
+            let transformed = pipeline.apply_with_shape(
                 record.image.as_slice(),
+                record.shape,
                 &mut rng,
                 PipelineMode::Train,
             );
@@ -171,8 +216,11 @@ impl CnnImageClassifier {
             {
                 let pending = pending_by_label
                     .entry(normalized_label.clone())
-                    .or_insert_with(|| Vec::with_capacity(effective_batch_size));
-                pending.push(transformed);
+                    .or_insert_with(|| VecDeque::with_capacity(effective_batch_size));
+                pending.push_back(PendingTrainSample {
+                    bytes: transformed,
+                    shape: record.shape,
+                });
                 if pending.len() >= effective_batch_size {
                     train_chunk = Some(pop_prefix(pending, effective_batch_size));
                 }
@@ -186,15 +234,73 @@ impl CnnImageClassifier {
 
             if let Some(train_chunk) = train_chunk {
                 let train_count = train_chunk.len();
-                let train_chunk_bytes = train_chunk.iter().map(Vec::len).sum::<usize>();
+                let train_chunk_bytes = train_chunk.iter().map(|sample| sample.bytes.len()).sum::<usize>();
                 inflight_samples = inflight_samples.saturating_sub(train_count);
                 inflight_bytes = inflight_bytes.saturating_sub(train_chunk_bytes);
 
                 let update_start = Instant::now();
-                if self
-                    .train_image_batch(&normalized_label, train_chunk.as_slice())
-                    .is_ok()
-                {
+                let mut chunk_model_elapsed_ms = 0.0f64;
+                let chunk_shape = train_chunk
+                    .first()
+                    .and_then(|sample| sample.shape)
+                    .filter(|shape| train_chunk.iter().all(|sample| sample.shape == Some(*shape)));
+                let train_images: Vec<Vec<u8>> = train_chunk.into_iter().map(|sample| sample.bytes).collect();
+                let train_result = match chunk_shape {
+                    Some(shape) => {
+                        let timed = self.train_image_batch_with_dimensions_timed(
+                            &normalized_label,
+                            train_images.as_slice(),
+                            shape,
+                        );
+                        if let Ok((_, timing)) = &timed {
+                            input_elapsed_ms += timing.input_elapsed_ms;
+                            feature_elapsed_ms += timing.feature_elapsed_ms;
+                            forward_conv_elapsed_ms += timing.forward_stage_metrics.conv_elapsed_ms;
+                            forward_pool_elapsed_ms += timing.forward_stage_metrics.pool_elapsed_ms;
+                            forward_global_pool_elapsed_ms += timing.forward_stage_metrics.global_pool_elapsed_ms;
+                            head_elapsed_ms += timing.head_elapsed_ms;
+                            backprop_elapsed_ms += timing.backprop_elapsed_ms;
+                            backprop_pooled_grad_elapsed_ms += timing.backprop_stage_metrics.pooled_grad_elapsed_ms;
+                            backprop_gradients_elapsed_ms += timing.backprop_stage_metrics.gradients_elapsed_ms;
+                            backprop_apply_update_elapsed_ms += timing.backprop_stage_metrics.apply_update_elapsed_ms;
+                            backprop_input_grad_transfer_elapsed_ms += timing.backprop_stage_metrics.input_grad_transfer_elapsed_ms;
+                            backprop_unpool_relu_elapsed_ms += timing.backprop_stage_metrics.unpool_relu_elapsed_ms;
+                            backprop_dw_elapsed_ms += timing.backprop_stage_metrics.dw_elapsed_ms;
+                            backprop_dinput_elapsed_ms += timing.backprop_stage_metrics.dinput_elapsed_ms;
+                            backprop_bias_grad_elapsed_ms += timing.backprop_stage_metrics.bias_grad_elapsed_ms;
+                            chunk_model_elapsed_ms = timing.input_elapsed_ms
+                                + timing.feature_elapsed_ms
+                                + timing.head_elapsed_ms
+                                + timing.backprop_elapsed_ms;
+                        }
+                        timed.map(|(loss, _timing)| loss)
+                    }
+                    None => {
+                        let timed = self.train_image_batch_timed(&normalized_label, train_images.as_slice());
+                        if let Ok((_, timing)) = &timed {
+                            input_elapsed_ms += timing.input_elapsed_ms;
+                            feature_elapsed_ms += timing.feature_elapsed_ms;
+                            forward_conv_elapsed_ms += timing.forward_stage_metrics.conv_elapsed_ms;
+                            forward_pool_elapsed_ms += timing.forward_stage_metrics.pool_elapsed_ms;
+                            forward_global_pool_elapsed_ms += timing.forward_stage_metrics.global_pool_elapsed_ms;
+                            head_elapsed_ms += timing.head_elapsed_ms;
+                            backprop_elapsed_ms += timing.backprop_elapsed_ms;
+                            backprop_pooled_grad_elapsed_ms += timing.backprop_stage_metrics.pooled_grad_elapsed_ms;
+                            backprop_gradients_elapsed_ms += timing.backprop_stage_metrics.gradients_elapsed_ms;
+                            backprop_apply_update_elapsed_ms += timing.backprop_stage_metrics.apply_update_elapsed_ms;
+                            backprop_input_grad_transfer_elapsed_ms += timing.backprop_stage_metrics.input_grad_transfer_elapsed_ms;
+                            backprop_dw_elapsed_ms += timing.backprop_stage_metrics.dw_elapsed_ms;
+                            backprop_dinput_elapsed_ms += timing.backprop_stage_metrics.dinput_elapsed_ms;
+                            backprop_bias_grad_elapsed_ms += timing.backprop_stage_metrics.bias_grad_elapsed_ms;
+                            chunk_model_elapsed_ms = timing.input_elapsed_ms
+                                + timing.feature_elapsed_ms
+                                + timing.head_elapsed_ms
+                                + timing.backprop_elapsed_ms;
+                        }
+                        timed.map(|(loss, _timing)| loss)
+                    }
+                };
+                if train_result.is_ok() {
                     report.trained_examples += train_count;
                     *report
                         .per_label_counts
@@ -202,7 +308,11 @@ impl CnnImageClassifier {
                         .or_insert(0) += train_count;
                     optimizer_steps += 1;
                 }
-                update_elapsed_ms += update_start.elapsed().as_secs_f64() * 1000.0;
+                let update_chunk_elapsed_ms = update_start.elapsed().as_secs_f64() * 1000.0;
+                update_elapsed_ms += update_chunk_elapsed_ms;
+                update_model_elapsed_ms += chunk_model_elapsed_ms;
+                update_overhead_elapsed_ms +=
+                    (update_chunk_elapsed_ms - chunk_model_elapsed_ms).max(0.0);
             }
         }
 
@@ -210,12 +320,74 @@ impl CnnImageClassifier {
             while !pending.is_empty() {
                 let train_chunk = pop_prefix(pending, effective_batch_size);
                 let train_count = train_chunk.len();
-                let train_chunk_bytes = train_chunk.iter().map(Vec::len).sum::<usize>();
+                let train_chunk_bytes = train_chunk.iter().map(|sample| sample.bytes.len()).sum::<usize>();
                 inflight_samples = inflight_samples.saturating_sub(train_count);
                 inflight_bytes = inflight_bytes.saturating_sub(train_chunk_bytes);
 
                 let flush_start = Instant::now();
-                if self.train_image_batch(label, train_chunk.as_slice()).is_ok() {
+                let mut chunk_model_elapsed_ms = 0.0f64;
+                let chunk_shape = train_chunk
+                    .first()
+                    .and_then(|sample| sample.shape)
+                    .filter(|shape| train_chunk.iter().all(|sample| sample.shape == Some(*shape)));
+                let train_images: Vec<Vec<u8>> = train_chunk.into_iter().map(|sample| sample.bytes).collect();
+                let train_result = match chunk_shape {
+                    Some(shape) => {
+                        let timed = self.train_image_batch_with_dimensions_timed(
+                            label,
+                            train_images.as_slice(),
+                            shape,
+                        );
+                        if let Ok((_, timing)) = &timed {
+                            input_elapsed_ms += timing.input_elapsed_ms;
+                            feature_elapsed_ms += timing.feature_elapsed_ms;
+                            forward_conv_elapsed_ms += timing.forward_stage_metrics.conv_elapsed_ms;
+                            forward_pool_elapsed_ms += timing.forward_stage_metrics.pool_elapsed_ms;
+                            forward_global_pool_elapsed_ms += timing.forward_stage_metrics.global_pool_elapsed_ms;
+                            head_elapsed_ms += timing.head_elapsed_ms;
+                            backprop_elapsed_ms += timing.backprop_elapsed_ms;
+                            backprop_pooled_grad_elapsed_ms += timing.backprop_stage_metrics.pooled_grad_elapsed_ms;
+                            backprop_gradients_elapsed_ms += timing.backprop_stage_metrics.gradients_elapsed_ms;
+                            backprop_apply_update_elapsed_ms += timing.backprop_stage_metrics.apply_update_elapsed_ms;
+                            backprop_input_grad_transfer_elapsed_ms += timing.backprop_stage_metrics.input_grad_transfer_elapsed_ms;
+                            backprop_unpool_relu_elapsed_ms += timing.backprop_stage_metrics.unpool_relu_elapsed_ms;
+                            backprop_dw_elapsed_ms += timing.backprop_stage_metrics.dw_elapsed_ms;
+                            backprop_dinput_elapsed_ms += timing.backprop_stage_metrics.dinput_elapsed_ms;
+                            backprop_bias_grad_elapsed_ms += timing.backprop_stage_metrics.bias_grad_elapsed_ms;
+                            chunk_model_elapsed_ms = timing.input_elapsed_ms
+                                + timing.feature_elapsed_ms
+                                + timing.head_elapsed_ms
+                                + timing.backprop_elapsed_ms;
+                        }
+                        timed.map(|(loss, _timing)| loss)
+                    }
+                    None => {
+                        let timed = self.train_image_batch_timed(label, train_images.as_slice());
+                        if let Ok((_, timing)) = &timed {
+                            input_elapsed_ms += timing.input_elapsed_ms;
+                            feature_elapsed_ms += timing.feature_elapsed_ms;
+                            forward_conv_elapsed_ms += timing.forward_stage_metrics.conv_elapsed_ms;
+                            forward_pool_elapsed_ms += timing.forward_stage_metrics.pool_elapsed_ms;
+                            forward_global_pool_elapsed_ms += timing.forward_stage_metrics.global_pool_elapsed_ms;
+                            head_elapsed_ms += timing.head_elapsed_ms;
+                            backprop_elapsed_ms += timing.backprop_elapsed_ms;
+                            backprop_pooled_grad_elapsed_ms += timing.backprop_stage_metrics.pooled_grad_elapsed_ms;
+                            backprop_gradients_elapsed_ms += timing.backprop_stage_metrics.gradients_elapsed_ms;
+                            backprop_apply_update_elapsed_ms += timing.backprop_stage_metrics.apply_update_elapsed_ms;
+                            backprop_input_grad_transfer_elapsed_ms += timing.backprop_stage_metrics.input_grad_transfer_elapsed_ms;
+                            backprop_unpool_relu_elapsed_ms += timing.backprop_stage_metrics.unpool_relu_elapsed_ms;
+                            backprop_dw_elapsed_ms += timing.backprop_stage_metrics.dw_elapsed_ms;
+                            backprop_dinput_elapsed_ms += timing.backprop_stage_metrics.dinput_elapsed_ms;
+                            backprop_bias_grad_elapsed_ms += timing.backprop_stage_metrics.bias_grad_elapsed_ms;
+                            chunk_model_elapsed_ms = timing.input_elapsed_ms
+                                + timing.feature_elapsed_ms
+                                + timing.head_elapsed_ms
+                                + timing.backprop_elapsed_ms;
+                        }
+                        timed.map(|(loss, _timing)| loss)
+                    }
+                };
+                if train_result.is_ok() {
                     report.trained_examples += train_count;
                     if let Some(count) = report.per_label_counts.get_mut(label) {
                         *count += train_count;
@@ -224,7 +396,11 @@ impl CnnImageClassifier {
                     }
                     optimizer_steps += 1;
                 }
-                flush_elapsed_ms += flush_start.elapsed().as_secs_f64() * 1000.0;
+                let flush_chunk_elapsed_ms = flush_start.elapsed().as_secs_f64() * 1000.0;
+                flush_elapsed_ms += flush_chunk_elapsed_ms;
+                flush_model_elapsed_ms += chunk_model_elapsed_ms;
+                flush_overhead_elapsed_ms +=
+                    (flush_chunk_elapsed_ms - chunk_model_elapsed_ms).max(0.0);
             }
         }
 
@@ -244,8 +420,27 @@ impl CnnImageClassifier {
             max_inflight_samples,
             max_inflight_bytes,
             transform_elapsed_ms,
+            input_elapsed_ms,
+            feature_elapsed_ms,
+            forward_conv_elapsed_ms,
+            forward_pool_elapsed_ms,
+            forward_global_pool_elapsed_ms,
+            head_elapsed_ms,
+            backprop_elapsed_ms,
+            backprop_pooled_grad_elapsed_ms,
+            backprop_gradients_elapsed_ms,
+            backprop_apply_update_elapsed_ms,
+            backprop_input_grad_transfer_elapsed_ms,
+            backprop_unpool_relu_elapsed_ms,
+            backprop_dw_elapsed_ms,
+            backprop_dinput_elapsed_ms,
+            backprop_bias_grad_elapsed_ms,
             update_elapsed_ms,
             flush_elapsed_ms,
+            update_model_elapsed_ms,
+            update_overhead_elapsed_ms,
+            flush_model_elapsed_ms,
+            flush_overhead_elapsed_ms,
         }
         
     }
