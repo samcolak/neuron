@@ -45,6 +45,29 @@ fn env_first(names: &[&str]) -> Option<String> {
     })
 }
 
+fn parse_bootstrap_peers(value: &str) -> Vec<neuralnet::distributed::Libp2pBootstrapPeer> {
+    value
+        .split(',')
+        .filter_map(|entry| {
+            let trimmed = entry.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let (peer_id, address) = trimmed.split_once('@')?;
+            let peer_id = peer_id.trim();
+            let address = address.trim();
+            if peer_id.is_empty() || address.is_empty() {
+                return None;
+            }
+
+            Some(neuralnet::distributed::Libp2pBootstrapPeer {
+                peer_id: peer_id.to_string(),
+                address: address.to_string(),
+            })
+        })
+        .collect()
+}
+
 fn run_impl() -> Result<(), String> {
 
     println!("\nDistributed server walkthrough");
@@ -59,6 +82,14 @@ fn run_impl() -> Result<(), String> {
         swarm_name: swarm_name.clone(),
         swarm_version: swarm_version.clone(),
         ..Libp2pTransportConfig::default()
+    };
+    let transport = if let Some(bootstrap) = env_first(&["NEURALNET_DISTRIBUTED_BOOTSTRAP_PEERS"]) {
+        Libp2pTransportConfig {
+            bootstrap_peers: parse_bootstrap_peers(bootstrap.as_str()),
+            ..transport
+        }
+    } else {
+        transport
     };
 
     let server_peer = RemotePeerDescriptor {
