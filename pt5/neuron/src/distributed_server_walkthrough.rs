@@ -72,17 +72,15 @@ fn run_impl() -> Result<(), String> {
 
     println!("\nDistributed server walkthrough");
 
-    let swarm_name = env_first(&["NEURALNET_DISTRIBUTED_SWARM_NAME", "NEURALNET_SWARM_NAME"])
-        .unwrap_or_else(|| "neuron-demo-swarm".to_string());
-    let swarm_version =
-        env_first(&["NEURALNET_DISTRIBUTED_SWARM_VERSION", "NEURALNET_SWARM_VERSION"])
-            .unwrap_or_else(|| "v1".to_string());
-
-    let transport = Libp2pTransportConfig {
-        swarm_name: swarm_name.clone(),
-        swarm_version: swarm_version.clone(),
-        ..Libp2pTransportConfig::default()
-    };
+    let mut transport = Libp2pTransportConfig::default();
+    if let Some(name) = env_first(&["NEURALNET_DISTRIBUTED_SWARM_NAME", "NEURALNET_SWARM_NAME"]) {
+        transport.swarm_name = name;
+    }
+    if let Some(version) = env_first(&["NEURALNET_DISTRIBUTED_SWARM_VERSION", "NEURALNET_SWARM_VERSION"]) {
+        transport.swarm_version = version;
+    }
+    let swarm_name = transport.swarm_name.clone();
+    let swarm_version = transport.swarm_version.clone();
     let transport = if let Some(bootstrap) = env_first(&["NEURALNET_DISTRIBUTED_BOOTSTRAP_PEERS"]) {
         Libp2pTransportConfig {
             bootstrap_peers: parse_bootstrap_peers(bootstrap.as_str()),
@@ -113,9 +111,10 @@ fn run_impl() -> Result<(), String> {
     .map_err(|error| format!("failed to start distributed server runtime: {error}"))?;
 
     println!(
-        "  server peer={} swarm={}",
+        "  server peer={} swarm={} version={}",
         runtime.local_peer().peer_id,
-        swarm_name
+        swarm_name,
+        swarm_version
     );
     println!("  discovered peers: {:?}", runtime.discovered_peers());
 
