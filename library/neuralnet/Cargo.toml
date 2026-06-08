@@ -5,7 +5,7 @@ edition = "2024"
 authors = ["Sam Colak <sam@samcolak.com>"]
 description = "Neural network library and training utilities for multimodal experiments"
 repository = "https://github.com/samcolak/neuron"
-readme = "README.md"
+readme = "./../readme.md"
 keywords = ["neural-networks", "machine-learning", "rust"]
 categories = ["science", "algorithms"]
 

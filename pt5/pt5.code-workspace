@@ -18,7 +18,6 @@
     }
   ],
   "settings": {
-    "rust-analyzer.checkOnSave.command": "clippy",
     "chat.tools.terminal.autoApprove": {
       "cargo clippy": true,
       "java": true,

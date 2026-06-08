@@ -3,6 +3,7 @@ name = "neuron"
 version = "0.1.0"
 edition = "2024"
 authors = ["Sam Colak <sam@samcolak.com>"]
+readme = "./../readme.md"
 description = "Runnable companion app and walkthrough harness for the neuralnet library"
 
 [features]
