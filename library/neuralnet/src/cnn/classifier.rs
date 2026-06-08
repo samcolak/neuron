@@ -1,11 +1,13 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::env;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::sync::mpsc;
 use std::sync::OnceLock;
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
@@ -204,7 +206,307 @@ struct BatchForwardCache {
     block2: Option<ConvBlockCache>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct CnnBatchPredictOptions {
+    pub max_micro_batch_size: usize,
+    pub enable_batch_preprocess: bool,
+}
+
+impl Default for CnnBatchPredictOptions {
+    fn default() -> Self {
+        Self {
+            max_micro_batch_size: 32,
+            enable_batch_preprocess: cnn_batch_preprocess_enabled(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CnnBatchPredictReport {
+    pub predictions: Vec<Option<(String, f32)>>,
+    pub total_images: usize,
+    pub micro_batch_count: usize,
+    pub max_micro_batch_size: usize,
+    pub preprocessing_elapsed_ms: f64,
+    pub model_elapsed_ms: f64,
+    pub total_elapsed_ms: f64,
+    pub throughput_images_per_sec: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CnnCoalescingPredictOptions {
+    pub max_micro_batch_size: usize,
+    pub max_queue_size: usize,
+    pub max_queue_delay_ms: u64,
+    pub enable_batch_preprocess: bool,
+}
+
+impl Default for CnnCoalescingPredictOptions {
+    fn default() -> Self {
+        Self {
+            max_micro_batch_size: 32,
+            max_queue_size: 64,
+            max_queue_delay_ms: 2,
+            enable_batch_preprocess: cnn_batch_preprocess_enabled(),
+        }
+    }
+}
+
+pub struct CnnCoalescingBatchPredictor<'a> {
+    classifier: &'a CnnImageClassifier,
+    options: CnnCoalescingPredictOptions,
+    pending: Vec<Vec<u8>>,
+    ready_predictions: Vec<Option<(String, f32)>>,
+    queue_started_at: Option<Instant>,
+    flushed_images: usize,
+    flush_count: usize,
+    preprocessing_elapsed_ms: f64,
+    model_elapsed_ms: f64,
+    total_elapsed_ms: f64,
+}
+
+type CnnPrediction = Option<(String, f32)>;
+type CnnPredictionResult = Result<CnnPrediction, CnnImageClassifierError>;
+type CnnPredictionSender = mpsc::Sender<CnnPredictionResult>;
+
+#[derive(Debug)]
+pub struct CnnCoalescedPredictionHandle {
+    response_rx: mpsc::Receiver<CnnPredictionResult>,
+}
+
+impl CnnCoalescedPredictionHandle {
+
+    pub fn wait(self) -> CnnPredictionResult {
+        self.response_rx.recv().map_err(|_| {
+            CnnImageClassifierError::InvalidConfiguration(
+                "coalescing scheduler response channel closed before delivering prediction",
+            )
+        })?
+    }
+
+}
+
+pub struct CnnCoalescingScheduler<'a> {
+    predictor: CnnCoalescingBatchPredictor<'a>,
+    responders: VecDeque<CnnPredictionSender>,
+    is_shutdown: bool,
+}
+
+impl<'a> CnnCoalescingScheduler<'a> {
+
+    pub fn submit(
+        &mut self,
+        image: Vec<u8>,
+    ) -> Result<CnnCoalescedPredictionHandle, CnnImageClassifierError> {
+        if self.is_shutdown {
+            return Err(CnnImageClassifierError::InvalidConfiguration(
+                "coalescing scheduler is not accepting new requests",
+            ));
+        }
+
+        let (response_tx, response_rx) = mpsc::channel();
+        self.responders.push_back(response_tx);
+
+        if let Err(err) = self.predictor.enqueue(image) {
+            fail_all_pending_responders(&mut self.responders);
+            return Err(err);
+        }
+
+        dispatch_ready_predictions(&mut self.predictor, &mut self.responders);
+        Ok(CnnCoalescedPredictionHandle { response_rx })
+    }
+
+    pub fn flush_if_due(&mut self) -> Result<bool, CnnImageClassifierError> {
+        if self.is_shutdown {
+            return Ok(false);
+        }
+
+        let flushed = self.predictor.flush_if_due()?;
+        if flushed {
+            dispatch_ready_predictions(&mut self.predictor, &mut self.responders);
+        }
+        Ok(flushed)
+    }
+
+    pub fn flush(&mut self) -> Result<(), CnnImageClassifierError> {
+        if self.is_shutdown {
+            return Ok(());
+        }
+
+        let _ = self.predictor.flush()?;
+        dispatch_ready_predictions(&mut self.predictor, &mut self.responders);
+        Ok(())
+    }
+
+    pub fn shutdown(mut self) -> Result<(), CnnImageClassifierError> {
+        self.flush()?;
+        self.is_shutdown = true;
+        Ok(())
+    }
+
+}
+
+impl Drop for CnnCoalescingScheduler<'_> {
+
+    fn drop(&mut self) {
+        if !self.is_shutdown {
+            let _ = self.predictor.flush();
+            dispatch_ready_predictions(&mut self.predictor, &mut self.responders);
+            self.is_shutdown = true;
+        }
+    }
+    
+}
+
+fn dispatch_ready_predictions(
+    predictor: &mut CnnCoalescingBatchPredictor<'_>,
+    responders: &mut VecDeque<CnnPredictionSender>,
+) {
+    for prediction in predictor.take_ready() {
+        if let Some(response_tx) = responders.pop_front() {
+            let _ = response_tx.send(Ok(prediction));
+        }
+    }
+}
+
+fn fail_all_pending_responders(
+    responders: &mut VecDeque<CnnPredictionSender>,
+) {
+    while let Some(response_tx) = responders.pop_front() {
+        let _ = response_tx.send(Err(CnnImageClassifierError::InvalidConfiguration(
+            "coalescing scheduler failed while processing pending requests",
+        )));
+    }
+}
+
+impl<'a> CnnCoalescingBatchPredictor<'a> {
+
+    pub fn new(classifier: &'a CnnImageClassifier, options: CnnCoalescingPredictOptions) -> Self {
+        Self {
+            classifier,
+            options,
+            pending: Vec::new(),
+            ready_predictions: Vec::new(),
+            queue_started_at: None,
+            flushed_images: 0,
+            flush_count: 0,
+            preprocessing_elapsed_ms: 0.0,
+            model_elapsed_ms: 0.0,
+            total_elapsed_ms: 0.0,
+        }
+    }
+
+    pub fn enqueue(&mut self, image: Vec<u8>) -> Result<(), CnnImageClassifierError> {
+        if self.pending.is_empty() {
+            self.queue_started_at = Some(Instant::now());
+        }
+
+        self.pending.push(image);
+
+        let max_queue_size = self.options.max_queue_size.max(1);
+        if self.pending.len() >= max_queue_size {
+            let _ = self.flush()?;
+        }
+
+        Ok(())
+    }
+
+    pub fn flush_if_due(&mut self) -> Result<bool, CnnImageClassifierError> {
+
+        if self.pending.is_empty() {
+            return Ok(false);
+        }
+
+        let should_flush = self
+            .queue_started_at
+            .is_some_and(|started| started.elapsed().as_millis() >= self.options.max_queue_delay_ms as u128);
+
+        if should_flush {
+            return self.flush();
+        }
+
+        Ok(false)
+    }
+
+    pub fn flush(&mut self) -> Result<bool, CnnImageClassifierError> {
+
+        if self.pending.is_empty() {
+            return Ok(false);
+        }
+
+        let report = self.classifier.predict_batch_with_confidence_report(
+            self.pending.as_slice(),
+            CnnBatchPredictOptions {
+                max_micro_batch_size: self.options.max_micro_batch_size,
+                enable_batch_preprocess: self.options.enable_batch_preprocess,
+            },
+        )?;
+
+        self.flushed_images += report.total_images;
+        self.flush_count += 1;
+        self.preprocessing_elapsed_ms += report.preprocessing_elapsed_ms;
+        self.model_elapsed_ms += report.model_elapsed_ms;
+        self.total_elapsed_ms += report.total_elapsed_ms;
+        self.ready_predictions.extend(report.predictions);
+
+        self.pending.clear();
+        self.queue_started_at = None;
+        Ok(true)
+
+    }
+
+    pub fn take_ready(&mut self) -> Vec<Option<(String, f32)>> {
+        std::mem::take(&mut self.ready_predictions)
+    }
+
+    pub fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+
+    pub fn finish(mut self) -> Result<CnnBatchPredictReport, CnnImageClassifierError> {
+
+        let _ = self.flush()?;
+
+        let throughput = if self.total_elapsed_ms > 0.0 {
+            self.flushed_images as f64 / (self.total_elapsed_ms / 1_000.0)
+        } else {
+            0.0
+        };
+
+        Ok(CnnBatchPredictReport {
+            predictions: self.ready_predictions,
+            total_images: self.flushed_images,
+            micro_batch_count: self.flush_count,
+            max_micro_batch_size: self.options.max_micro_batch_size.max(1),
+            preprocessing_elapsed_ms: self.preprocessing_elapsed_ms,
+            model_elapsed_ms: self.model_elapsed_ms,
+            total_elapsed_ms: self.total_elapsed_ms,
+            throughput_images_per_sec: throughput,
+        })
+        
+    }
+
+}
+
 impl CnnImageClassifier {
+
+    pub fn coalescing_batch_predictor(
+        &self,
+        options: CnnCoalescingPredictOptions,
+    ) -> CnnCoalescingBatchPredictor<'_> {
+        CnnCoalescingBatchPredictor::new(self, options)
+    }
+
+    pub fn start_coalescing_scheduler(
+        &self,
+        options: CnnCoalescingPredictOptions,
+    ) -> CnnCoalescingScheduler<'_> {
+        CnnCoalescingScheduler {
+            predictor: CnnCoalescingBatchPredictor::new(self, options),
+            responders: VecDeque::new(),
+            is_shutdown: false,
+        }
+    }
 
     pub fn new(
         class_labels: Vec<String>,
@@ -263,6 +565,7 @@ impl CnnImageClassifier {
         feature_channels: &[usize],
         learning_rate: f32,
     ) -> Result<Self, CnnImageClassifierError> {
+
         if input_height == 0 || input_width == 0 {
             return Err(CnnImageClassifierError::InvalidConfiguration(
                 "input height and width must be greater than zero",
@@ -280,6 +583,7 @@ impl CnnImageClassifier {
                 "feature channel configuration must contain one or two layers",
             ));
         }
+
         if feature_channels.contains(&0) {
             return Err(CnnImageClassifierError::InvalidConfiguration(
                 "feature channel counts must be greater than zero",
@@ -290,6 +594,7 @@ impl CnnImageClassifier {
         let mut label_to_index = BTreeMap::new();
 
         for raw in class_labels {
+
             let normalized = raw.trim().to_ascii_lowercase();
             if normalized.is_empty() {
                 continue;
@@ -301,6 +606,7 @@ impl CnnImageClassifier {
             let idx = normalized_labels.len();
             label_to_index.insert(normalized.clone(), idx);
             normalized_labels.push(normalized);
+            
         }
 
         if normalized_labels.len() < 2 {
@@ -341,6 +647,7 @@ impl CnnImageClassifier {
             head,
             min_confidence: 0.5,
         })
+
     }
 
     pub fn class_labels(&self) -> &[String] {
@@ -483,6 +790,7 @@ impl CnnImageClassifier {
         &self,
         input: &Tensor4D,
     ) -> Result<(Vec<f32>, ForwardCache), CnnImageClassifierError> {
+
         let (n, c, h, w) = input.shape();
         if n != 1
             || c != self.input_channels
@@ -607,6 +915,7 @@ impl CnnImageClassifier {
                 block2: block2_cache_batch,
             },
         ))
+        
     }
 
     pub fn train_image(&mut self, label: &str, image_bytes: &[u8]) -> Result<f32, CnnImageClassifierError> {
@@ -895,9 +1204,112 @@ impl CnnImageClassifier {
         &self,
         image_bytes: &[u8],
     ) -> Result<Option<(String, f32)>, CnnImageClassifierError> {
-
         let features = self.extract_features(image_bytes)?;
-        let probs = self.head.probabilities(features.as_slice())?;
+        self.classify_feature_vector(features.as_slice())
+    }
+
+    pub fn predict_batch_with_confidence(
+        &self,
+        images: &[Vec<u8>],
+    ) -> Result<Vec<Option<(String, f32)>>, CnnImageClassifierError> {
+        let report = self.predict_batch_with_confidence_report(images, CnnBatchPredictOptions::default())?;
+        Ok(report.predictions)
+    }
+
+    pub fn predict_batch_with_confidence_report(
+        &self,
+        images: &[Vec<u8>],
+        options: CnnBatchPredictOptions,
+    ) -> Result<CnnBatchPredictReport, CnnImageClassifierError> {
+        if images.is_empty() {
+            return Ok(CnnBatchPredictReport {
+                predictions: Vec::new(),
+                total_images: 0,
+                micro_batch_count: 0,
+                max_micro_batch_size: options.max_micro_batch_size.max(1),
+                preprocessing_elapsed_ms: 0.0,
+                model_elapsed_ms: 0.0,
+                total_elapsed_ms: 0.0,
+                throughput_images_per_sec: 0.0,
+            });
+        }
+
+        let total_start = Instant::now();
+        let max_micro_batch_size = options.max_micro_batch_size.max(1);
+        let mut predictions = Vec::with_capacity(images.len());
+        let mut preprocess_elapsed_sec = 0.0f64;
+        let mut model_elapsed_sec = 0.0f64;
+        let mut micro_batch_count = 0usize;
+
+        for chunk in images.chunks(max_micro_batch_size) {
+            micro_batch_count += 1;
+
+            let common_shape = chunk
+                .first()
+                .and_then(|first| infer_square_dimensions_and_channels(first.as_slice()))
+                .filter(|(_, _, channels)| *channels == self.input_channels)
+                .and_then(|(in_h, in_w, in_c)| {
+                    let all_match = chunk.iter().all(|image| {
+                        infer_square_dimensions_and_channels(image.as_slice())
+                            .is_some_and(|(h, w, c)| h == in_h && w == in_w && c == in_c)
+                    });
+                    if all_match {
+                        Some((in_h, in_w, in_c))
+                    } else {
+                        None
+                    }
+                });
+
+            if options.enable_batch_preprocess
+                && let Some((in_h, in_w, in_c)) = common_shape
+            {
+                let preprocess_start = Instant::now();
+                let batch_inputs = image_batch_to_tensor_nchw_resized_with_channels(
+                    chunk,
+                    in_h,
+                    in_w,
+                    in_c,
+                    self.input_height,
+                    self.input_width,
+                    true,
+                )?;
+                preprocess_elapsed_sec += preprocess_start.elapsed().as_secs_f64();
+
+                let model_start = Instant::now();
+                let (feature_batch, _cache) = self.forward_batch_with_cache_from_tensor(&batch_inputs)?;
+                for features in feature_batch {
+                    predictions.push(self.classify_feature_vector(features.as_slice())?);
+                }
+                model_elapsed_sec += model_start.elapsed().as_secs_f64();
+                continue;
+            }
+
+            for image in chunk {
+                let model_start = Instant::now();
+                let features = self.forward_for_inference(image.as_slice())?;
+                predictions.push(self.classify_feature_vector(features.as_slice())?);
+                model_elapsed_sec += model_start.elapsed().as_secs_f64();
+            }
+        }
+
+        let total_elapsed_sec = total_start.elapsed().as_secs_f64();
+        Ok(CnnBatchPredictReport {
+            predictions,
+            total_images: images.len(),
+            micro_batch_count,
+            max_micro_batch_size,
+            preprocessing_elapsed_ms: preprocess_elapsed_sec * 1_000.0,
+            model_elapsed_ms: model_elapsed_sec * 1_000.0,
+            total_elapsed_ms: total_elapsed_sec * 1_000.0,
+            throughput_images_per_sec: images.len() as f64 / total_elapsed_sec.max(1e-9),
+        })
+    }
+
+    fn classify_feature_vector(
+        &self,
+        features: &[f32],
+    ) -> Result<Option<(String, f32)>, CnnImageClassifierError> {
+        let probs = self.head.probabilities(features)?;
 
         let mut best_idx = 0usize;
         let mut best_prob = f32::NEG_INFINITY;
@@ -921,7 +1333,6 @@ impl CnnImageClassifier {
             ))?;
 
         Ok(Some((label, best_prob)))
-
     }
 
     pub fn save_to_file(&self, path: &Path) -> io::Result<()> {
@@ -1818,5 +2229,285 @@ mod tests {
         for (a, b) in cached_features.iter().zip(inference_features.iter()) {
             assert!((a - b).abs() < 1e-4, "feature mismatch: {a} vs {b}");
         }
+    }
+
+    #[test]
+    fn cnn_classifier_batch_prediction_matches_single_prediction() {
+        let mut classifier = CnnImageClassifier::new(
+            vec!["animal_cat".to_string(), "animal_dog".to_string()],
+            16,
+            16,
+            0.2,
+        )
+        .unwrap_or_else(|_| panic!("cnn classifier should initialize"));
+        classifier.set_min_confidence(0.0);
+
+        let cat = vertical_stripes_image_8x8();
+        let dog = horizontal_stripes_image_8x8();
+
+        for _ in 0..40 {
+            let _ = classifier.train_image("animal_cat", cat.as_slice());
+            let _ = classifier.train_image("animal_dog", dog.as_slice());
+        }
+
+        let images = vec![cat.clone(), dog.clone(), cat.clone(), dog.clone()];
+        let singles: Vec<Option<(String, f32)>> = images
+            .iter()
+            .map(|image| {
+                classifier
+                    .predict_with_confidence(image.as_slice())
+                    .unwrap_or_else(|_| panic!("single prediction should succeed"))
+            })
+            .collect();
+
+        let batch = classifier
+            .predict_batch_with_confidence(images.as_slice())
+            .unwrap_or_else(|_| panic!("batch prediction should succeed"));
+
+        assert_eq!(batch, singles);
+    }
+
+    #[test]
+    fn cnn_classifier_batch_prediction_report_has_expected_metrics() {
+        let mut classifier = CnnImageClassifier::new(
+            vec!["animal_cat".to_string(), "animal_dog".to_string()],
+            16,
+            16,
+            0.2,
+        )
+        .unwrap_or_else(|_| panic!("cnn classifier should initialize"));
+        classifier.set_min_confidence(0.0);
+
+        let cat = vertical_stripes_image_8x8();
+        let dog = horizontal_stripes_image_8x8();
+
+        for _ in 0..20 {
+            let _ = classifier.train_image("animal_cat", cat.as_slice());
+            let _ = classifier.train_image("animal_dog", dog.as_slice());
+        }
+
+        let images = vec![cat.clone(), dog.clone(), cat, dog];
+        let report = classifier
+            .predict_batch_with_confidence_report(
+                images.as_slice(),
+                CnnBatchPredictOptions {
+                    max_micro_batch_size: 2,
+                    enable_batch_preprocess: true,
+                },
+            )
+            .unwrap_or_else(|_| panic!("batch report prediction should succeed"));
+
+        assert_eq!(report.total_images, 4);
+        assert_eq!(report.max_micro_batch_size, 2);
+        assert_eq!(report.micro_batch_count, 2);
+        assert_eq!(report.predictions.len(), 4);
+        assert!(report.total_elapsed_ms >= 0.0);
+        assert!(report.throughput_images_per_sec >= 0.0);
+    }
+
+    #[test]
+    fn cnn_classifier_coalescing_predictor_flushes_by_queue_size() {
+        let mut classifier = CnnImageClassifier::new(
+            vec!["animal_cat".to_string(), "animal_dog".to_string()],
+            16,
+            16,
+            0.2,
+        )
+        .unwrap_or_else(|_| panic!("cnn classifier should initialize"));
+        classifier.set_min_confidence(0.0);
+
+        let cat = vertical_stripes_image_8x8();
+        let dog = horizontal_stripes_image_8x8();
+
+        for _ in 0..20 {
+            let _ = classifier.train_image("animal_cat", cat.as_slice());
+            let _ = classifier.train_image("animal_dog", dog.as_slice());
+        }
+
+        let mut predictor = classifier.coalescing_batch_predictor(CnnCoalescingPredictOptions {
+            max_micro_batch_size: 2,
+            max_queue_size: 2,
+            max_queue_delay_ms: 50,
+            enable_batch_preprocess: true,
+        });
+
+        predictor
+            .enqueue(cat.clone())
+            .unwrap_or_else(|_| panic!("enqueue should succeed"));
+        assert_eq!(predictor.pending_len(), 1);
+
+        predictor
+            .enqueue(dog.clone())
+            .unwrap_or_else(|_| panic!("enqueue should flush when queue is full"));
+        assert_eq!(predictor.pending_len(), 0);
+
+        let ready = predictor.take_ready();
+        assert_eq!(ready.len(), 2);
+
+        let singles = vec![
+            classifier
+                .predict_with_confidence(cat.as_slice())
+                .unwrap_or_else(|_| panic!("single prediction should succeed")),
+            classifier
+                .predict_with_confidence(dog.as_slice())
+                .unwrap_or_else(|_| panic!("single prediction should succeed")),
+        ];
+        assert_eq!(ready, singles);
+    }
+
+    #[test]
+    fn cnn_classifier_coalescing_predictor_flushes_when_due() {
+        let mut classifier = CnnImageClassifier::new(
+            vec!["animal_cat".to_string(), "animal_dog".to_string()],
+            16,
+            16,
+            0.2,
+        )
+        .unwrap_or_else(|_| panic!("cnn classifier should initialize"));
+        classifier.set_min_confidence(0.0);
+
+        let cat = vertical_stripes_image_8x8();
+        let dog = horizontal_stripes_image_8x8();
+
+        for _ in 0..20 {
+            let _ = classifier.train_image("animal_cat", cat.as_slice());
+            let _ = classifier.train_image("animal_dog", dog.as_slice());
+        }
+
+        let mut predictor = classifier.coalescing_batch_predictor(CnnCoalescingPredictOptions {
+            max_micro_batch_size: 8,
+            max_queue_size: 64,
+            max_queue_delay_ms: 0,
+            enable_batch_preprocess: true,
+        });
+
+        predictor
+            .enqueue(cat)
+            .unwrap_or_else(|_| panic!("enqueue should succeed"));
+        predictor
+            .enqueue(dog)
+            .unwrap_or_else(|_| panic!("enqueue should succeed"));
+
+        let due_flushed = predictor
+            .flush_if_due()
+            .unwrap_or_else(|_| panic!("flush-if-due should succeed"));
+        assert!(due_flushed);
+
+        let report = predictor
+            .finish()
+            .unwrap_or_else(|_| panic!("finish should succeed"));
+
+        assert_eq!(report.total_images, 2);
+        assert_eq!(report.micro_batch_count, 1);
+        assert_eq!(report.predictions.len(), 2);
+    }
+
+    #[test]
+    fn cnn_classifier_coalescing_scheduler_matches_single_prediction_order() {
+        let mut classifier = CnnImageClassifier::new(
+            vec!["animal_cat".to_string(), "animal_dog".to_string()],
+            16,
+            16,
+            0.2,
+        )
+        .unwrap_or_else(|_| panic!("cnn classifier should initialize"));
+        classifier.set_min_confidence(0.0);
+
+        let cat = vertical_stripes_image_8x8();
+        let dog = horizontal_stripes_image_8x8();
+
+        for _ in 0..20 {
+            let _ = classifier.train_image("animal_cat", cat.as_slice());
+            let _ = classifier.train_image("animal_dog", dog.as_slice());
+        }
+
+        let images = vec![cat.clone(), dog.clone(), cat.clone(), dog.clone()];
+        let expected: Vec<Option<(String, f32)>> = images
+            .iter()
+            .map(|image| {
+                classifier
+                    .predict_with_confidence(image.as_slice())
+                    .unwrap_or_else(|_| panic!("single prediction should succeed"))
+            })
+            .collect();
+
+        let mut scheduler = classifier.start_coalescing_scheduler(CnnCoalescingPredictOptions {
+            max_micro_batch_size: 4,
+            max_queue_size: 64,
+            max_queue_delay_ms: 0,
+            enable_batch_preprocess: true,
+        });
+
+        let handles: Vec<CnnCoalescedPredictionHandle> = images
+            .into_iter()
+            .map(|image| {
+                scheduler
+                    .submit(image)
+                    .unwrap_or_else(|_| panic!("scheduler submit should succeed"))
+            })
+            .collect();
+
+        scheduler
+            .flush()
+            .unwrap_or_else(|_| panic!("scheduler flush should succeed"));
+
+        let actual: Vec<Option<(String, f32)>> = handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .wait()
+                    .unwrap_or_else(|_| panic!("scheduler wait should succeed"))
+            })
+            .collect();
+
+        assert_eq!(actual, expected);
+
+        scheduler
+            .shutdown()
+            .unwrap_or_else(|_| panic!("scheduler shutdown should succeed"));
+    }
+
+    #[test]
+    fn cnn_classifier_coalescing_scheduler_flush_unblocks_pending_request() {
+        let mut classifier = CnnImageClassifier::new(
+            vec!["animal_cat".to_string(), "animal_dog".to_string()],
+            16,
+            16,
+            0.2,
+        )
+        .unwrap_or_else(|_| panic!("cnn classifier should initialize"));
+        classifier.set_min_confidence(0.0);
+
+        let cat = vertical_stripes_image_8x8();
+        let dog = horizontal_stripes_image_8x8();
+
+        for _ in 0..20 {
+            let _ = classifier.train_image("animal_cat", cat.as_slice());
+            let _ = classifier.train_image("animal_dog", dog.as_slice());
+        }
+
+        let mut scheduler = classifier.start_coalescing_scheduler(CnnCoalescingPredictOptions {
+            max_micro_batch_size: 8,
+            max_queue_size: 64,
+            max_queue_delay_ms: 5_000,
+            enable_batch_preprocess: true,
+        });
+
+        let handle = scheduler
+            .submit(cat)
+            .unwrap_or_else(|_| panic!("scheduler submit should succeed"));
+
+        scheduler
+            .flush()
+            .unwrap_or_else(|_| panic!("scheduler flush should succeed"));
+
+        let prediction = handle
+            .wait()
+            .unwrap_or_else(|_| panic!("scheduler wait should succeed"));
+        assert!(prediction.is_some());
+
+        scheduler
+            .shutdown()
+            .unwrap_or_else(|_| panic!("scheduler shutdown should succeed"));
     }
 }

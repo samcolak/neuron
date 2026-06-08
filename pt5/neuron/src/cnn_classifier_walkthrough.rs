@@ -5,6 +5,8 @@ use crate::trainer_fixtures::{
 };
 use crate::trainer_presentation::{print_confusion_matrix, print_label_metrics};
 use neuralnet::cnn::classifier::CnnImageClassifier;
+use neuralnet::cnn::classifier::CnnBatchPredictOptions;
+use neuralnet::cnn::classifier::CnnCoalescingPredictOptions;
 use neuralnet::cnn::cnn_trainer::{
     CnnEvaluationSample,
     CnnScaleTrainConfig,
@@ -75,6 +77,13 @@ struct LargeBenchmarkSummary {
     update_ms: f64,
     flush_ms: f64,
     eval_micro_f1: f64,
+}
+
+#[derive(Debug, Clone)]
+struct SchedulerRecipeSummary {
+    predictions: Vec<Option<(String, f32)>>,
+    elapsed_ms: f64,
+    known_predictions: usize,
 }
 
 fn mean(values: &[f64]) -> f64 {
@@ -487,6 +496,49 @@ fn collect_large_benchmark_summary() -> LargeBenchmarkSummary {
     }
 }
 
+fn run_scheduler_production_recipe(
+    classifier: &CnnImageClassifier,
+    images: &[Vec<u8>],
+    options: CnnCoalescingPredictOptions,
+) -> SchedulerRecipeSummary {
+    let scheduler_start = Instant::now();
+    let mut scheduler = classifier.start_coalescing_scheduler(options);
+
+    let request_handles: Vec<_> = images
+        .iter()
+        .cloned()
+        .map(|image| {
+            scheduler
+                .submit(image)
+                .unwrap_or_else(|_| panic!("scheduler submit should succeed"))
+        })
+        .collect();
+
+    scheduler
+        .flush()
+        .unwrap_or_else(|_| panic!("scheduler flush should succeed"));
+
+    let predictions: Vec<_> = request_handles
+        .into_iter()
+        .map(|handle| {
+            handle
+                .wait()
+                .unwrap_or_else(|_| panic!("scheduler wait should succeed"))
+        })
+        .collect();
+
+    scheduler
+        .shutdown()
+        .unwrap_or_else(|_| panic!("scheduler shutdown should succeed"));
+
+    let known_predictions = predictions.iter().filter(|prediction| prediction.is_some()).count();
+    SchedulerRecipeSummary {
+        predictions,
+        elapsed_ms: scheduler_start.elapsed().as_secs_f64() * 1_000.0,
+        known_predictions,
+    }
+}
+
 pub fn run_cnn_classifier_walkthrough() {
     println!("\nCNN classifier walkthrough");
     let backend_label = active_backend_label();
@@ -580,6 +632,93 @@ pub fn run_cnn_classifier_walkthrough() {
         "  post-train prediction(cat) -> {}",
         post.map(|value| format!("{} ({:.3})", value.0, value.1))
             .unwrap_or_else(|| "<unknown>".to_string())
+    );
+
+    let enterprise_batch_images = vec![
+        cat_image.clone(),
+        dog_image.clone(),
+        vertical_stripes_image_8x8(),
+        horizontal_stripes_image_8x8(),
+        cat_image.clone(),
+        dog_image.clone(),
+        vertical_stripes_image_8x8(),
+        horizontal_stripes_image_8x8(),
+    ];
+
+    let batch_report = classifier
+        .predict_batch_with_confidence_report(
+            enterprise_batch_images.as_slice(),
+            CnnBatchPredictOptions {
+                max_micro_batch_size: 4,
+                enable_batch_preprocess: true,
+            },
+        )
+        .unwrap_or_else(|_| panic!("batch prediction report should succeed"));
+
+    println!(
+        "  enterprise inference batch: images={} micro_batches={} max_micro_batch={} throughput={:.1} img/s preprocess_ms={:.2} model_ms={:.2} total_ms={:.2}",
+        batch_report.total_images,
+        batch_report.micro_batch_count,
+        batch_report.max_micro_batch_size,
+        batch_report.throughput_images_per_sec,
+        batch_report.preprocessing_elapsed_ms,
+        batch_report.model_elapsed_ms,
+        batch_report.total_elapsed_ms,
+    );
+
+    let mut coalesced_predictor = classifier.coalescing_batch_predictor(CnnCoalescingPredictOptions {
+        max_micro_batch_size: 4,
+        max_queue_size: 3,
+        max_queue_delay_ms: 0,
+        enable_batch_preprocess: true,
+    });
+    for image in enterprise_batch_images.iter().cloned() {
+        coalesced_predictor
+            .enqueue(image)
+            .unwrap_or_else(|_| panic!("coalesced enqueue should succeed"));
+        let _ = coalesced_predictor
+            .flush_if_due()
+            .unwrap_or_else(|_| panic!("coalesced due flush should succeed"));
+    }
+    let coalesced_report = coalesced_predictor
+        .finish()
+        .unwrap_or_else(|_| panic!("coalesced predictor finish should succeed"));
+
+    println!(
+        "  enterprise inference coalesced: images={} flushes={} max_micro_batch={} throughput={:.1} img/s preprocess_ms={:.2} model_ms={:.2} total_ms={:.2}",
+        coalesced_report.total_images,
+        coalesced_report.micro_batch_count,
+        coalesced_report.max_micro_batch_size,
+        coalesced_report.throughput_images_per_sec,
+        coalesced_report.preprocessing_elapsed_ms,
+        coalesced_report.model_elapsed_ms,
+        coalesced_report.total_elapsed_ms,
+    );
+
+    println!("  coalescing scheduler walkthrough (production recipe helper)");
+    let scheduler_summary = run_scheduler_production_recipe(
+        &classifier,
+        enterprise_batch_images.as_slice(),
+        CnnCoalescingPredictOptions {
+        max_micro_batch_size: 4,
+        max_queue_size: 8,
+        max_queue_delay_ms: 2,
+        enable_batch_preprocess: true,
+        },
+    );
+
+    let scheduler_parity = if scheduler_summary.predictions == batch_report.predictions {
+        "match"
+    } else {
+        "mismatch"
+    };
+
+    println!(
+        "  scheduler result: requests={} known_predictions={} elapsed_ms={:.2} parity_vs_batch={}",
+        scheduler_summary.predictions.len(),
+        scheduler_summary.known_predictions,
+        scheduler_summary.elapsed_ms,
+        scheduler_parity,
     );
 
     println!("  augmented pipeline wireup demo");
