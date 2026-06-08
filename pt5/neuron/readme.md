@@ -1,64 +1,89 @@
 
-# Neuron Application Test Suite
+# Neuron App
 
-Latest test suite and examples for the Library (in ../library) - Note that the code is test functionality and gives an overview of the way the library functions
+Neuron is the runnable companion app for the `neuralnet` library. It exists to show the library in action, compare backend behavior, and provide realistic walkthroughs for training, inference, and multimodal flows.
 
-The platform has been rigerously built and tested on M1/M2 and M5 Cores without issue - It also is performant on an Intel i9(Apple) Processor too
+## What this app gives you
 
-# Using external backends...
+- A polished entry point for exercising the library from the command line.
+- Real walkthroughs for CNN training, batch inference, backend comparison, and multimodal demonstrations.
+- A practical way to see how CPU, CUDA, and MLX execution modes behave on the current machine.
+- A reproducible harness for validating performance, quality, and backend policy changes.
 
-The functionality (Tensors) enable you to offload the performance to external hardware (GPU or vCores) based upon accessibility to the appropriate hardware
+## Why it matters
 
-Again this is NOT feature complete - I welcome any additional help if someone wishes to assist
+- CPU remains the stable baseline for all runs.
+- Accelerators can be enabled when available without changing the app structure.
+- The app reflects the current runtime backend selection and fallback policy used by the library.
+- It is useful both as a test surface and as a reference implementation for integrating the library into a larger service.
 
-## Using CUDA (For NVidia GPUS)
+## Backend support
 
-Sorry at the moment this is not fully implemented (yet) - The code is there but not battle-tested
+### CPU
 
-## Using MLX (For Apple Mx Device)
+CPU is always available and is the default execution path.
 
-The code actively runs all tests through the CPU unless you modify the default feature flag to MLX - Be aware though that there are some hoops to jump through.
+### CUDA
 
-## Using MLX - A quick guide
+CUDA support is available through feature gating, but it remains less battle-tested than the CPU path.
 
-Ok - Firstly make sure CMAKE is installed via brew or your package manager
+### MLX for Apple Silicon
 
-The make sure you have installed the metal framework
+The app and library can run with MLX on Apple Silicon, but you must point the build at an external MLX prefix.
 
-```bash
-xcrun -sdk macosx metal -v
-```
-
-```bash
-sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
-xcrun -sdk macosx metal -v
-```
-
-Head to the root of the directory in which you have cloned the repo.
-
-This repo does not ship MLX binaries in-source anymore. You must point the build at an external MLX prefix that already contains:
+The external prefix must contain:
 
 - `lib/libmlx.dylib`
 - `lib/libjaccl.dylib`
 - `lib/mlx.metallib`
 - `share/cmake/MLX/MLXConfig.cmake`
 
-You can do that in either of these ways:
+You can configure it with:
 
 ```bash
 export APPLE_MLX_PREFIX="/absolute/path/to/mlx-prefix"
 ```
 
-or
+or, if you prefer a local link:
 
 ```bash
 ln -s /absolute/path/to/mlx-prefix ../library/neuralnet/vendor/apple-mlx/.linked/mlx-prefix
 ```
 
-If you are using a Homebrew MLX install, point to the prefix explicitly instead of relying on auto-discovery:
+If you use Homebrew MLX, point to the prefix explicitly:
 
 ```bash
 export APPLE_MLX_PREFIX="/opt/homebrew/opt/mlx"
 ```
 
-Once this is done, MLX should be then correctly bounded to the GPU cores (as opposed to the CPU)
+If the Metal tooling is not ready, confirm Xcode Command Line Tools are set correctly:
+
+```bash
+sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+xcrun -sdk macosx metal -v
+```
+
+## Running the app
+
+Use the app as a comparison and validation harness while developing the library.
+
+```bash
+cargo run
+```
+
+To enable MLX when the environment is ready:
+
+```bash
+cargo run --features offloading-mlx
+```
+
+To enable CUDA:
+
+```bash
+cargo run --features offloading-cuda
+```
+
+## Notes
+
+- The app is intentionally focused on demonstrating the library rather than providing a general-purpose UI.
+- It is a good place to validate backend policy, performance changes, and new inference/training workflows.
