@@ -27,13 +27,42 @@ package "tensor" {
 
   interface TensorBackend {
     + name(): &'static str
+    + training_capabilities(): BackendTrainingCapabilities
     + conv2d_valid(...): Result<Tensor4D, TensorError>
     + max_pool2d(...): Result<Tensor4D, TensorError>
     + global_average_pool2d(input: &Tensor4D): Result<Tensor4D, TensorError>
     + relu_inplace(input: &mut Tensor4D)
     + conv_relu_max_pool2d_valid(...): Result<Tensor4D, TensorError>
     + conv_blocks_to_feature_vec(...): Result<Vec<f32>, TensorError>
+    + conv_block_backward_gradients(...): Result<ConvBlockBackwardGradients, TensorError>
   }
+
+  class ConvBlockBackwardGradients {
+    + kernel_grad: Tensor4D
+    + bias_grad: Vec<f32>
+    + input_grad: Option<Tensor4D>
+  }
+
+  class BackendTrainingCapabilities {
+    + native_forward_execution: bool
+    + native_backward_execution: bool
+    + host_materializes_gradients: bool
+    + device_resident_parameter_state: bool
+    + device_side_parameter_updates: bool
+  }
+
+  class ConvParameterState {
+    + new(kernels: Tensor4D, bias: Vec<f32>): ConvParameterState
+    + kernels(): &Tensor4D
+    + bias(): &[f32]
+    + accumulate_gradients(kernel_grad: &Tensor4D, bias_grad: &[f32]): Result<(), TensorError>
+    + apply_sgd_update(learning_rate: f32, batch_size: f32): Result<(), TensorError>
+    + sync_backend_mirror()
+    + refresh_host_from_backend()
+  }
+
+  enum ParameterResidency
+  enum ParameterBackendKind
 
   class CpuTensorBackend
   class CudaTensorBackend
@@ -58,6 +87,7 @@ package "tensor" {
     + active_backend(): &dyn TensorBackend
     + active_backend_name(): &'static str
     + active_backend_label(): &'static str
+    + active_backend_training_capabilities(): BackendTrainingCapabilities
     + cuda_backend_available(): bool
     + mlx_backend_available(): bool
   }
@@ -71,9 +101,14 @@ class Image <<external>>
 TensorBackend <|.. CpuTensorBackend
 TensorBackend <|.. CudaTensorBackend
 TensorBackend <|.. MlxTensorBackend
+TensorBackend ..> BackendTrainingCapabilities
+TensorBackend ..> ConvBlockBackwardGradients
 
 Tensor4D ..> TensorError
 Tensor4D ..> TensorBackend
+ConvParameterState ..> Tensor4D
+ConvParameterState ..> ParameterResidency
+ConvParameterState ..> ParameterBackendKind
 
 TensorIo ..> Tensor4D
 TensorIo ..> TensorIoError
@@ -87,6 +122,7 @@ ImageUtils ..> ImageTensorUtilityError
 ImageUtils ..> Image
 
 BackendSelector ..> TensorBackend
+BackendSelector ..> BackendTrainingCapabilities
 BackendSelector ..> Offloading
 BackendSelector ..> CpuTensorBackend
 BackendSelector ..> CudaTensorBackend

@@ -32,10 +32,8 @@ package "cnn" {
     - input_channels: usize
     - class_labels: Vec<String>
     - label_to_index: BTreeMap<String, usize>
-    - conv1_kernels: Tensor4D
-    - conv1_bias: Vec<f32>
-    - conv2_kernels: Option<Tensor4D>
-    - conv2_bias: Option<Vec<f32>>
+    - conv1: ConvParameterState
+    - conv2: Option<ConvParameterState>
     - feature_learning_rate: f32
     - head: LinearHead
     - min_confidence: f32
@@ -106,6 +104,7 @@ package "cnn" {
 }
 
 class Tensor4D <<external>>
+class ConvParameterState <<external>>
 class LinearHead <<external>>
 class LinearOptimizer <<external>>
 class TransformRng <<external>>
@@ -115,6 +114,7 @@ CnnImageClassifier ..> CnnImageClassifierError
 CnnFeatureExtractor ..> CnnFeatureExtractorError
 
 CnnImageClassifier ..> Tensor4D
+CnnImageClassifier ..> ConvParameterState
 CnnImageClassifier ..> LinearHead
 CnnImageClassifier ..> LinearOptimizer
 ImageTransformPipeline ..> PipelineMode

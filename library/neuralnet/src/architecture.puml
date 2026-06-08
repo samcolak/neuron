@@ -11,6 +11,8 @@ package "src" {
   class MultiModalBrain {
     + classify_pattern(content: &MultiModalInput): Option<ClassificationResult>
     + run_supervised_pipeline(...): BrainSupervisedPipelineReport
+    + enable_auto_snapshot_in_dir(instance_id: &str, dir: &Path, every_n_inserts: usize)
+    + flush_auto_snapshot(): io::Result<bool>
   }
 
   class NeuralNetwork {
@@ -91,7 +93,28 @@ package "src" {
     + set(...): Result<(), TensorError>
   }
 
-  interface TensorBackend
+  interface TensorBackend {
+    + training_capabilities(): BackendTrainingCapabilities
+    + conv_block_backward_gradients(...): Result<ConvBlockBackwardGradients, TensorError>
+  }
+
+  class ConvBlockBackwardGradients {
+    + kernel_grad: Tensor4D
+    + bias_grad: Vec<f32>
+    + input_grad: Option<Tensor4D>
+  }
+
+  class BackendTrainingCapabilities {
+    + native_forward_execution: bool
+    + native_backward_execution: bool
+    + host_materializes_gradients: bool
+  }
+
+  class ConvParameterState {
+    + accumulate_gradients(...): Result<(), TensorError>
+    + apply_sgd_update(...): Result<(), TensorError>
+    + sync_backend_mirror()
+  }
 
   class TrainingLoopConfig {
     + epochs: usize
@@ -144,6 +167,9 @@ RagContext *-- RagChunk
 RagAnswer *-- RagContext
 
 Tensor4D ..> TensorBackend
+TensorBackend ..> BackendTrainingCapabilities
+TensorBackend ..> ConvBlockBackwardGradients
+ConvParameterState ..> Tensor4D
 
 NeuralNetwork ..> NetworkNode
 NeuralNetwork ..> NodeNetworkController
@@ -152,6 +178,7 @@ TextDendrite ..|> NetworkNode
 ImageDendrite ..|> NetworkNode
 
 CnnImageClassifier ..> Tensor4D
+CnnImageClassifier ..> ConvParameterState
 TrainingLoopReport ..> TrainerEvaluationReport
 TrainingLoopConfig ..> MultiModalBrain
 @enduml

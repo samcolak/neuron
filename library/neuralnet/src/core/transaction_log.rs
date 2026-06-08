@@ -58,6 +58,7 @@ static TRANSACTION_LOG_WORKER: OnceLock<TransactionLogWorker> = OnceLock::new();
 static WAL_FSYNC_ENABLED: OnceLock<bool> = OnceLock::new();
 
 fn wal_fsync_enabled() -> bool {
+
     *WAL_FSYNC_ENABLED.get_or_init(|| {
         env::var("NEURALNET_WAL_FSYNC")
             .ok()
@@ -67,14 +68,18 @@ fn wal_fsync_enabled() -> bool {
             })
             .unwrap_or(false)
     })
+
 }
 
 impl TransactionLogWorker {
+
     fn new() -> Self {
+
         let state = Arc::new((
             Mutex::new(TransactionLogState::default()),
             Condvar::new(),
         ));
+
         let thread_state = Arc::clone(&state);
 
         std::thread::Builder::new()
@@ -83,18 +88,21 @@ impl TransactionLogWorker {
             .expect("transaction log writer thread should start");
 
         Self { state }
+
     }
 
     fn submit(&self, key: String, path: PathBuf, operation: TransactionOperation) -> u64 {
+
         let (lock, condvar) = &*self.state;
         let mut state = lock
             .lock()
             .expect("transaction log state lock should not be poisoned");
 
         state.next_sequence = state.next_sequence.saturating_add(1);
-        let sequence = state.next_sequence;
 
+        let sequence = state.next_sequence;
         let record = TransactionRecord { operation };
+
         state
             .pending_by_key
             .entry(key.clone())
@@ -108,15 +116,18 @@ impl TransactionLogWorker {
 
         condvar.notify_one();
         sequence
+
     }
 
     fn wait_for_at_least(&self, key: &str, target_sequence: u64) -> io::Result<()> {
+
         let (lock, condvar) = &*self.state;
         let mut state = lock
             .lock()
             .expect("transaction log state lock should not be poisoned");
 
         loop {
+
             if let Some(results) = state.results_by_key.get(key)
                 && let Some((_, maybe_error)) = results.range(target_sequence..).next()
             {
@@ -129,19 +140,25 @@ impl TransactionLogWorker {
             state = condvar
                 .wait(state)
                 .expect("transaction log state lock should not be poisoned");
+
         }
+
     }
 
     fn latest_error(&self, key: &str) -> Option<String> {
+
         let (lock, _) = &*self.state;
         let state = lock
             .lock()
             .expect("transaction log state lock should not be poisoned");
 
         let results = state.results_by_key.get(key)?;
+
         let (_, maybe_error) = results.last_key_value()?;
         maybe_error.clone()
+
     }
+
 }
 
 fn worker() -> &'static TransactionLogWorker {
@@ -149,8 +166,11 @@ fn worker() -> &'static TransactionLogWorker {
 }
 
 fn run_transaction_log_worker(state: Arc<(Mutex<TransactionLogState>, Condvar)>) {
+
     loop {
+
         let jobs = {
+
             let (lock, condvar) = &*state;
             let mut guard = lock
                 .lock()
@@ -163,13 +183,16 @@ fn run_transaction_log_worker(state: Arc<(Mutex<TransactionLogState>, Condvar)>)
             }
 
             let mut collected = Vec::new();
+            
             for (_key, mut pending) in guard.pending_by_key.drain() {
                 collected.append(&mut pending);
             }
             collected
+
         };
 
         for job in jobs {
+
             let write_result = append_record_to_log(job.path.as_path(), &job.record);
             let error_message = write_result.err().map(|err| err.to_string());
 
@@ -191,8 +214,11 @@ fn run_transaction_log_worker(state: Arc<(Mutex<TransactionLogState>, Condvar)>)
             }
 
             condvar.notify_all();
+
         }
+
     }
+
 }
 
 pub(crate) fn append_transaction(
@@ -216,6 +242,7 @@ pub(crate) fn truncate_transaction_log(path: &Path) -> io::Result<()> {
 }
 
 pub(crate) fn load_and_sanitize_transaction_log(path: &Path) -> io::Result<Vec<TransactionOperation>> {
+
     let mut file = match OpenOptions::new().read(true).open(path) {
         Ok(file) => file,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -244,6 +271,7 @@ pub(crate) fn load_and_sanitize_transaction_log(path: &Path) -> io::Result<Vec<T
     let mut operations = Vec::new();
 
     while cursor + 4 <= bytes.len() {
+
         let len_bytes: [u8; 4] = bytes[cursor..cursor + 4]
             .try_into()
             .expect("slice of 4 bytes should convert");
@@ -264,13 +292,16 @@ pub(crate) fn load_and_sanitize_transaction_log(path: &Path) -> io::Result<Vec<T
         if let Ok(record) = bincode::deserialize::<TransactionRecord>(record_bytes) {
             operations.push(record.operation);
         }
+        
     }
 
     rewrite_transaction_log(path, operations.as_slice())?;
     Ok(operations)
+
 }
 
 fn append_record_to_log(path: &Path, record: &TransactionRecord) -> io::Result<()> {
+
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -301,14 +332,17 @@ fn append_record_to_log(path: &Path, record: &TransactionRecord) -> io::Result<(
     file.write_all(&len_bytes)?;
     file.write_all(encoded.as_slice())?;
     file.flush()?;
+
     if wal_fsync_enabled() {
         file.sync_data()?;
     }
 
     Ok(())
+
 }
 
 fn rewrite_transaction_log(path: &Path, operations: &[TransactionOperation]) -> io::Result<()> {
+
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -331,6 +365,7 @@ fn rewrite_transaction_log(path: &Path, operations: &[TransactionOperation]) -> 
     file.write_all(&TRANSACTION_LOG_MAGIC_V1)?;
 
     for operation in operations {
+
         let record = TransactionRecord {
             operation: operation.clone(),
         };
@@ -345,13 +380,17 @@ fn rewrite_transaction_log(path: &Path, operations: &[TransactionOperation]) -> 
         let len_bytes = (encoded.len() as u32).to_le_bytes();
         file.write_all(&len_bytes)?;
         file.write_all(encoded.as_slice())?;
+
     }
 
     file.flush()?;
+
     if wal_fsync_enabled() {
         file.sync_data()?;
     }
+
     fs::rename(&tmp_path, path)?;
 
     Ok(())
+
 }

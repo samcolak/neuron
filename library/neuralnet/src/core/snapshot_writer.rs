@@ -27,6 +27,7 @@ struct SnapshotWriteWorker {
 static SNAPSHOT_WRITE_WORKER: OnceLock<SnapshotWriteWorker> = OnceLock::new();
 
 impl SnapshotWriteWorker {
+
     fn new() -> Self {
         let state = Arc::new((
             Mutex::new(SnapshotWriteState::default()),
@@ -40,9 +41,11 @@ impl SnapshotWriteWorker {
             .expect("snapshot writer thread should start");
 
         Self { state }
+
     }
 
     fn submit(&self, key: String, path: PathBuf, bytes: Vec<u8>) -> u64 {
+
         let (lock, condvar) = &*self.state;
         let mut state = lock
             .lock()
@@ -63,9 +66,11 @@ impl SnapshotWriteWorker {
 
         condvar.notify_one();
         generation
+
     }
 
     fn wait_for_at_least(&self, key: &str, target_generation: u64) -> io::Result<()> {
+
         let (lock, condvar) = &*self.state;
         let mut state = lock
             .lock()
@@ -85,19 +90,24 @@ impl SnapshotWriteWorker {
                 .wait(state)
                 .expect("snapshot writer state lock should not be poisoned");
         }
+
     }
 
     fn latest_error(&self, key: &str) -> Option<String> {
+        
         let (lock, _) = &*self.state;
         let state = lock
             .lock()
             .expect("snapshot writer state lock should not be poisoned");
         let results = state.results_by_key.get(key)?;
         let (_, maybe_error) = results.last_key_value()?;
+        
         maybe_error.clone()
+
     }
 
     fn is_complete_at_least(&self, key: &str, target_generation: u64) -> bool {
+
         let (lock, _) = &*self.state;
         let state = lock
             .lock()
@@ -109,6 +119,7 @@ impl SnapshotWriteWorker {
 
         results.range(target_generation..).next().is_some()
     }
+
 }
 
 fn worker() -> &'static SnapshotWriteWorker {
@@ -178,6 +189,7 @@ pub(crate) fn is_snapshot_write_complete(key: &str, target_generation: u64) -> b
 }
 
 pub(crate) fn write_snapshot_bytes_to_path(path: &Path, bytes: &[u8]) -> io::Result<()> {
+
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -195,4 +207,5 @@ pub(crate) fn write_snapshot_bytes_to_path(path: &Path, bytes: &[u8]) -> io::Res
     fs::rename(&tmp_path, path)?;
 
     Ok(())
+    
 }

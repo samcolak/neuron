@@ -13,12 +13,43 @@ package "core" {
     - memory_net: MultiModalSubNetwork
     - classifier: PatternClassifier
     - image_feature_extractor: Option<CnnFeatureExtractor>
+    - auto_snapshot: AutoSnapshotPolicy
+    - transaction_log: AutoTransactionLogPolicy
+    - query_cache_enabled: bool
+    - query_score_cache: QueryScoreCache
     + new_multimodal(): MultiModalBrain
     + classify_pattern(content: &MultiModalInput): Option<ClassificationResult>
     + classify_pattern_top_k(content: &MultiModalInput, k: usize): Vec<ClassificationResult>
     + run_supervised_pipeline(...): BrainSupervisedPipelineReport
     + snapshot_instance(instance_id: &str): io::Result<()>
+    + snapshot_instance_in_dir(instance_id: &str, dir: &Path): io::Result<()>
     + load_snapshot_instance(instance_id: &str): io::Result<SnapshotLoadStatus>
+    + load_snapshot_instance_in_dir(instance_id: &str, dir: &Path): io::Result<SnapshotLoadStatus>
+    + enable_auto_snapshot_in_dir(instance_id: &str, dir: &Path, every_n_inserts: usize)
+    + flush_auto_snapshot(): io::Result<bool>
+    + snapshot_bundle_path_for_instance_in_dir(instance_id: &str, dir: &Path): PathBuf
+  }
+
+  class AutoSnapshotPolicy {
+    + instance_id: Option<String>
+    + dir: Option<PathBuf>
+    + every_n_inserts: usize
+    + pending_inserts: usize
+    + last_enqueued_generation: u64
+  }
+
+  class AutoTransactionLogPolicy {
+    + instance_id: Option<String>
+    + dir: Option<PathBuf>
+    + last_enqueued_sequence: u64
+    + replay_in_progress: bool
+  }
+
+  class QueryScoreCache {
+    + with_capacity(capacity: usize): QueryScoreCache
+    + get(key: &str): Option<f64>
+    + insert(key: String, value: f64)
+    + clear()
   }
 
   class NetworkDump {
@@ -117,6 +148,9 @@ class MultimodalDendrite <<external>>
 
 MultiModalBrain *-- PatternClassifier
 MultiModalBrain *-- MultiModalSubNetwork
+MultiModalBrain *-- AutoSnapshotPolicy
+MultiModalBrain *-- AutoTransactionLogPolicy
+MultiModalBrain *-- QueryScoreCache
 MultiModalBrain ..> CnnFeatureExtractor
 MultiModalBrain ..> MultiModalInput
 MultiModalBrain ..> DendriteType
