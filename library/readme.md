@@ -50,11 +50,82 @@ The library includes checkpointing and snapshot flows so model state can be pers
 	- cpu
 	- cuda
 	- mlx
+	- distributed (aliases: p2p, swarm)
 	- auto
 - Fallback order is centralized:
-	- cuda -> mlx -> cpu
+	- preferred backend -> cpu fallback on runtime error
+	- auto mode probes in this order: cuda -> mlx -> distributed -> cpu
 
 This design keeps trainer/core code simpler while making backend expansion safer as new kernels are introduced.
+
+## Distributed tensor units (DTUs)
+
+Distributed tensor units provide remote tensor operation execution over the built-in libp2p transport so heavy tensor work can be offloaded to remote peers while keeping the same high-level tensor API.
+
+### What DTUs execute today
+
+- Remote tensor operations:
+	- Conv2dValid
+	- MaxPool2d
+	- GlobalAveragePool2d
+	- Relu
+	- ConvReluMaxPool2dValid
+- Remote feature-stack forward execution:
+	- FeatureStackForward over one or more convolution blocks
+
+The distributed backend is exposed as tensor backend name distributed and runs through a transport-backed executor.
+
+### Activation and feature flags
+
+- Enable distributed backend support at build time:
+	- backend-distributed
+- Select distributed backend at runtime:
+	- NEURALNET_TENSOR_BACKEND=distributed
+	- NEURALNET_BACKEND=distributed
+
+Note: auto backend selection checks cuda, then mlx, then distributed. If distributed is required, set it explicitly.
+
+### Peer and transport configuration
+
+Client-side distributed tensor execution uses these environment variables:
+
+- NEURALNET_DISTRIBUTED_LOCAL_PEER
+- NEURALNET_DISTRIBUTED_LOCAL_PLATFORM
+- NEURALNET_DISTRIBUTED_LOCAL_ACCELERATOR
+- NEURALNET_DISTRIBUTED_TARGET_PEER
+- NEURALNET_DISTRIBUTED_TARGET_PLATFORM
+- NEURALNET_DISTRIBUTED_TARGET_ACCELERATOR
+- NEURALNET_DISTRIBUTED_BOOTSTRAP_PEERS
+- NEURALNET_DISTRIBUTED_TIMEOUT_MS
+- NEURALNET_DISTRIBUTED_DISCOVERY_WAIT_MS
+- NEURALNET_DISTRIBUTED_SWARM_NAME (or NEURALNET_SWARM_NAME)
+- NEURALNET_DISTRIBUTED_SWARM_VERSION (or NEURALNET_SWARM_VERSION)
+
+Distributed libp2p transport/server controls also include:
+
+- NEURALNET_DISTRIBUTED_SERVER_BACKEND
+- NEURALNET_DISTRIBUTED_DEBUG
+
+Bootstrap peer format for NEURALNET_DISTRIBUTED_BOOTSTRAP_PEERS is a comma-separated list of peer@multiaddr values, for example:
+
+- 12D3KooWExamplePeerA@/ip4/10.0.0.12/udp/9000/quic-v1,12D3KooWExamplePeerB@/ip4/10.0.0.13/udp/9000/quic-v1
+
+### Execution behavior and fallback
+
+- The distributed executor initializes once and warms up peer discovery before first remote tensor operation.
+- If exactly one remote peer is discovered, it is selected automatically.
+- If multiple remote peers are discovered, set NEURALNET_DISTRIBUTED_TARGET_PEER explicitly.
+- If no peer is discovered, distributed execution fails with guidance to set bootstrap peers or wait for discovery.
+- During tensor op failover, backend routing can degrade to local CPU fallback (when CPU fallback is enabled).
+
+### Server-side runtime
+
+The distributed server runtime is available through:
+
+- DistributedServerConfig
+- DistributedServerRuntime
+
+Server capability announcements and peer discovery are handled through the same libp2p transport layer used by distributed tensor execution.
 
 ## Versioning guidance
 
